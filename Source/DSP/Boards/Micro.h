@@ -23,6 +23,19 @@
 // mod 4) T-states after the call (its setup and first, shortened pass), then
 // one every 4 HL + 118 (Chips/Beeper.h). A key-up lets the loop finish its
 // cycle, as BEEPER ends only after a full one, with EAR low.
+//
+// ULA contention (World of Spectrum, "48K reference" and "128K reference",
+// read 2026-11-17; spec): the ROM is not contended, but port $FE is, so the
+// loop's OUT ($FE),A waits whenever its I/O cycle meets the ULA reading the
+// screen. With A's high byte outside $40-$7F and the port's low bit 0 the
+// pattern is N:1, C:3: the I/O cycle's first T-state runs, then the CPU is
+// held for the delay at that cycle, then runs 3 more, and the OUT takes
+// effect as it ends. The delay is 6, 5, 4, 3, 2, 1, 0, 0 over each 8
+// T-states of the first 128 of a line, on the 192 screen lines, from
+// T-state 14335 of the 48K's 69888 (224 a line) and 14361 of the 128K's
+// 70908 (228 a line). Each delay moves the rest of the loop with it, so a
+// note runs slower and unevenly while the screen is drawn. The frame starts
+// at the board's cycle 0 (ours: any phase is the machine's).
 
 #include "../Chips/Ay8910.h"
 #include "../Chips/Beeper.h"
@@ -76,7 +89,7 @@ public:
             beeper_.Write(static_cast<std::uint8_t>((ear_ ? 0x10 : 0x00) | 0x08), beep);
             if (stopping_ && !ear_)
                 beeping_ = false;
-            due_ += zx::BeeperHalfPeriod(hl_);
+            due_ = Contended(due_ + zx::BeeperHalfPeriod(hl_));
         }
         if (HasAy())
             ay_.Run(cycle, sink);
@@ -191,7 +204,7 @@ private:
             if (volume > 0 && (!beeping_ || stopping_)) {
                 if (!beeping_) {
                     // BEEPER's setup and first pass, from the call.
-                    due_ = (RunCursor() + 209 - 12 * (hl_ & 3));
+                    due_ = Contended(RunCursor() + 209 - 12 * (hl_ & 3));
                     ear_ = beeper_.Out() >= 2;
                 }
                 beeping_ = true;
@@ -242,6 +255,18 @@ private:
         sh.period = s.period;
         sh.volume = volume;
         sh.shape = s.shape & 3;
+    }
+
+    // When an OUT ($FE) that would end at `end` uncontended ends: its I/O
+    // cycle is held at end - 3 (N:1, C:3).
+    [[nodiscard]] std::int64_t Contended(std::int64_t end) const noexcept {
+        static constexpr int kDelay[8] = { 6, 5, 4, 3, 2, 1, 0, 0 };
+        const bool is128 = revision_ == k128K;
+        const std::int64_t line = is128 ? 228 : 224;
+        const std::int64_t t = (end - 3) % FrameCycles() - (is128 ? 14361 : 14335);
+        if (t < 0 || t >= 192 * line || t % line >= 128)
+            return end;
+        return end + kDelay[t % line % 8];
     }
 
     // The cycle the playing layer's writes land on: where the chips stand.

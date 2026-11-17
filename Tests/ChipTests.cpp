@@ -314,6 +314,69 @@ void TestGameBoy() {
         Check(std::fabs(r.period - 16384.0) < 0.01, "gb pulse period " + std::to_string(r.period) + " != 16384");
         Check(std::fabs(r.high - expected[duty]) < 0.002, "gb duty " + std::to_string(duty) + " high " + std::to_string(r.high));
     }
+
+    // Pan Docs, Obscure Behavior: "the low two bits of the frequency timer
+    // are NOT modified" when a pulse is triggered, whether it is playing or
+    // was stopped. A trigger at 100 leaves the timer due at 2148 (period
+    // x = $600: 2048 cycles); retriggered at 1001 it counts 1147, low bits
+    // 3, so its steps fall 3 cycles after whole periods from 1001, at 3052
+    // and on. Its DAC turned off at 19999 it holds the count to 21484,
+    // 1485, low bits 1, which a trigger at 30001 keeps.
+    {
+        using A = gb::Apu;
+        using T = Trace<A>;
+        std::vector<Step<A>> s;
+        s.push_back(At<A>(100, [](A& a, T& t) {
+            a.Write(0xFF11, 0x00, t);
+            a.Write(0xFF12, 0xF0, t);
+            a.Write(0xFF13, 0x00, t);
+            a.Write(0xFF14, 0x86, t);
+        }));
+        s.push_back(At<A>(1001, [](A& a, T& t) { a.Write(0xFF14, 0x86, t); }));
+        s.push_back(At<A>(19999, [](A& a, T& t) { a.Write(0xFF12, 0x00, t); }));
+        s.push_back(At<A>(30001, [](A& a, T& t) {
+            a.Write(0xFF12, 0xF0, t);
+            a.Write(0xFF14, 0x86, t);
+        }));
+        const Trace<A> r = Play(apu, GbRead, s, 60000, 60001);
+        const auto stepsFrom = [&](std::int64_t trigger, std::int64_t until, std::int64_t kept) {
+            int n = 0;
+            for (const auto& e : r.events)
+                if (e.first > trigger && e.first < until) {
+                    ++n;
+                    if ((e.first - trigger) % 2048 != kept)
+                        return false;
+                }
+            return n >= 2;
+        };
+        Check(stepsFrom(1001, 19999, 3), "gb pulse trigger does not keep its timer's low two bits");
+        Check(stepsFrom(30001, 60000, 1), "gb pulse trigger after a stop does not keep the held count's low bits");
+    }
+
+    // Pan Docs, Obscure Behavior: a wave trigger plays first "the previous
+    // one still in the high nibble of the sample buffer", then index 1.
+    // Period x = $400 steps every 2048 cycles: from a trigger at 10 the
+    // channel reads 1, 2 and 3 (the byte $23) by 6154; retriggered at 7000
+    // it plays 2, then 1 at 9048.
+    {
+        using A = gb::Apu;
+        using T = Trace<A>;
+        std::vector<Step<A>> s;
+        s.push_back(At<A>(10, [](A& a, T& t) {
+            static const std::uint8_t wave[16] = { 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+                                                   0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10 };
+            a.LoadWave(wave);
+            a.Write(0xFF1A, 0x80, t);
+            a.Write(0xFF1C, 0x20, t);
+            a.Write(0xFF1D, 0x00, t);
+            a.Write(0xFF1E, 0x84, t);
+        }));
+        s.push_back(At<A>(7000, [](A& a, T& t) { a.Write(0xFF1E, 0x84, t); }));
+        const Trace<A> r = Play(apu, GbRead, s, 12000, 12001);
+        Check(r.At(6999)[2] == 3, "gb wave does not play index 3 before the retrigger");
+        Check(r.At(7000)[2] == 2, "gb wave trigger does not play the buffer's high nibble first");
+        Check(r.At(9047)[2] == 2 && r.At(9048)[2] == 1, "gb wave trigger does not go on to index 1");
+    }
 }
 
 // ---------------------------------------------------------------------------

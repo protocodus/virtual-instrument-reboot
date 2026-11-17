@@ -26,9 +26,13 @@ that uses it.
 - MAME's `sn76496.cpp` and `ay8910.cpp` (BSD-3-Clause), for the rules they
   state about each variant.
 - General Instrument's AY-3-8910 data manual.
-- World of Spectrum, "Spectrum technical information" (the 48K's tech notes),
-  and the ZX Spectrum ROM's BEEPER and BEEP routines ($03B5, $03F8), read for
-  their timing.
+- World of Spectrum, "Spectrum technical information" (the 48K's tech notes)
+  and its 48K and 128K references (frame timing and contention), and the ZX
+  Spectrum ROM's BEEPER and BEEP routines ($03B5, $03F8), read for their
+  timing.
+- Brad Smith's nes-audio-tests (freely redistributable) and its results in
+  the NESdev forum (threads t=17741 and t=24288): the 5B's level against
+  the APU and the APU's DAC curves.
 
 No ROM image, game music data or recording is part of this repository.
 Game Boy, NES, Famicom, Master System, Game Gear and ZX Spectrum are

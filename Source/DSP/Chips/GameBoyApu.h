@@ -14,9 +14,9 @@
 // Not modelled, because no source in hand states them: the DAC's fade to 0
 // when it is turned off (Pan Docs: "not entirely deterministic and varies
 // between models"), the "zombie" volume writes other than the one Pan Docs
-// calls consistent on every unit, the wave channel's start-up delay and the
-// low two bits a pulse trigger keeps. A disabled channel's generators stand
-// still until it is triggered again.
+// calls consistent on every unit and the wave channel's start-up delay. A
+// disabled channel's generators stand still until it is triggered again,
+// its frequency timer holding the count it stopped on.
 
 #include "Lfsr.h"
 #include "Timer.h"
@@ -118,6 +118,7 @@ public:
             if (on && !power_) {
                 divStep_ = 0;
                 wave_.sample = 0;
+                wave_.buffer = 0;
             }
             power_ = on;
         } else if (power_) {
@@ -186,7 +187,8 @@ private:
         Envelope envelope;
         Length length;
         Divider timer { 0, 4 * 2048 };
-        bool live = false;
+        bool live = false, wasOn = false;
+        std::int64_t held = 0;                 // the timer's count while off
         void SetPeriod(int p) noexcept {
             period = static_cast<std::uint16_t>(p & 0x7FF);
             timer.period = 4 * (2048 - period);   // 1048576 Hz divider clock
@@ -202,6 +204,7 @@ private:
     struct Wave {
         bool on = false, dac = false;
         std::uint8_t level = 0, position = 0, sample = 0;   // NR32 bits 6-5
+        std::uint8_t buffer = 0;                  // the sample buffer: the last byte read
         std::uint16_t period = 0;
         int extension = 0;                        // ours: SetWaveExtension
         Length length;
@@ -358,7 +361,11 @@ private:
         Square& s = square_[i];
         LengthTrigger(s.length, 64);
         s.envelope.Trigger(divStep_ == 7);
-        s.timer.due = now_ + s.timer.period;
+        // Pan Docs, Obscure Behavior: "the low two bits of the frequency
+        // timer are NOT modified" by a trigger. The timer counts master
+        // cycles to its next duty step; its reload, 4 (2048 - x), has none.
+        const std::int64_t count = s.on ? s.timer.due - now_ : s.held;
+        s.timer.due = now_ + s.timer.period + (count & 3);
         if (!s.started) {
             // Pan Docs, Obscure Behavior: the first duty step after the first
             // trigger plays as 0, and the duty clock waits for that trigger.
@@ -391,9 +398,11 @@ private:
                     waveRam_[j] = waveRam_[base + j];
             }
         }
-        // The first sample after a trigger is index 1; the buffer keeps the
-        // last sample read until then.
+        // Pan Docs, Obscure Behavior: a trigger does not read wave RAM, so
+        // the first sample is "the previous one still in the high nibble of
+        // the sample buffer", and the next is index 1.
         wave_.position = 0;
+        wave_.sample = wave_.buffer >> 4;
         wave_.timer.due = now_ + wave_.timer.period;
         wave_.on = wave_.dac;
     }
@@ -471,8 +480,8 @@ private:
         if (k == 0)
             return;
         wave_.position = static_cast<std::uint8_t>((wave_.position + k) & 31);
-        const std::uint8_t byte = waveRam_[wave_.position >> 1];
-        wave_.sample = (wave_.position & 1) ? (byte & 0x0F) : (byte >> 4);
+        wave_.buffer = waveRam_[wave_.position >> 1];
+        wave_.sample = (wave_.position & 1) ? (wave_.buffer & 0x0F) : (wave_.buffer >> 4);
     }
 
     void CatchUpAll() noexcept {
@@ -518,6 +527,11 @@ private:
             dacs[i] = (s.envelope.reg & 0xF8) != 0;
             if (!dacs[i])
                 s.on = false;
+            // A channel turned off keeps its timer's count for the next
+            // trigger; every path here has caught the timer up first.
+            if (s.wasOn && !s.on)
+                s.held = s.timer.due - now_;
+            s.wasOn = s.on;
             const bool live = s.on && s.envelope.volume > 0;
             if (live && !s.live)
                 s.StepDuty(s.timer.CatchUp(now_));

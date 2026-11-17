@@ -16,6 +16,9 @@
 //   pulse = 95.88 / (8128 / (p1 + p2) + 100)
 //   tnd   = 159.79 / (1 / (t / 8227 + n / 12241 + d / 22638) + 100)
 // each 0 when its inputs are 0. A pulse at 15 alone is 0.149377 (kPulse15).
+// Brad Smith's DAC measurements of a front-loader and a Famicom (NESdev
+// forum t=24288, read 2026-11-17) found these curves "reasonably good",
+// with variance between units.
 //
 // The cartridge chips, mixed linearly onto that scale (NESdev Wiki, each
 // chip's audio page, read 2026-11-17):
@@ -33,8 +36,13 @@
 //   by 1, 1.5, 2 or 2.5 ("FDS audio", reported).
 // - 5B: 1.5 dB a step of its 5-bit DAC (3 dB a volume step), codes 0 and 1
 //   silent ("Sunsoft 5B audio", reported). Its level against the APU is
-//   unsourced: by our convention a 5B channel at full volume equals the
-//   APU's pulse at 15 (Known gaps).
+//   Brad Smith's survey (nes-audio-tests, db_5b, results in the NESdev
+//   forum thread t=17741, read 2026-11-17; reported, one cartridge): a 5B
+//   square at volume 12 measured 1.3 dB under the APU's square at full
+//   volume, both 50 % duty, by RMS. Volume 12 is code 25, 9 dB under code
+//   31, so code 31 is 7.7 dB over the APU's pulse at 15. The page's "the
+//   amplifier becomes nonlinear at higher amplitudes, and includes some
+//   filtering" has no figures (Known gaps).
 //
 // Line stage (NESdev Wiki, "APU Mixer", reported): the front-loader's
 // first-order high-pass at 90 Hz and low-pass at 14 kHz; the Famicom's
@@ -547,24 +555,25 @@ private:
     static constexpr double kN163Step = kPulse15 * 3.9810717055349722 / 225.0;
     // 2.4 times the APU square, on the wave's 63 x 32 peak to peak.
     static constexpr double kFdsStep = kPulse15 * 2.4 / (63.0 * 32.0);
-    // 5B: code 31 at kPulse15, 1.5 dB a code down, 0 and 1 silent.
+    // 5B: code 25 1.3 dB under kPulse15, 1.5 dB a code, 0 and 1 silent.
+    static constexpr double k5BFull = kPulse15 * 2.4266100950824154;   // 10^(7.7 / 20)
     static constexpr double k5BLevel[32] = {
         0.0, 0.0,
-        kPulse15 * 0.0066834391756861, kPulse15 * 0.0079432823472428,
-        kPulse15 * 0.0094406087628592, kPulse15 * 0.0112201845430196,
-        kPulse15 * 0.0133352143216332, kPulse15 * 0.0158489319246111,
-        kPulse15 * 0.0188364908948980, kPulse15 * 0.0223872113856834,
-        kPulse15 * 0.0266072505979881, kPulse15 * 0.0316227766016838,
-        kPulse15 * 0.0375837404288444, kPulse15 * 0.0446683592150963,
-        kPulse15 * 0.0530884444230988, kPulse15 * 0.0630957344480193,
-        kPulse15 * 0.0749894209332456, kPulse15 * 0.0891250938133746,
-        kPulse15 * 0.1059253725177289, kPulse15 * 0.1258925411794168,
-        kPulse15 * 0.1496235656094433, kPulse15 * 0.1778279410038923,
-        kPulse15 * 0.2113489039836647, kPulse15 * 0.2511886431509580,
-        kPulse15 * 0.2985382618917959, kPulse15 * 0.3548133892335755,
-        kPulse15 * 0.4216965034285822, kPulse15 * 0.5011872336272722,
-        kPulse15 * 0.5956621435290105, kPulse15 * 0.7079457843841379,
-        kPulse15 * 0.8413951416451951, kPulse15 * 1.0000000000000000,
+        k5BFull * 0.0066834391756861, k5BFull * 0.0079432823472428,
+        k5BFull * 0.0094406087628592, k5BFull * 0.0112201845430196,
+        k5BFull * 0.0133352143216332, k5BFull * 0.0158489319246111,
+        k5BFull * 0.0188364908948980, k5BFull * 0.0223872113856834,
+        k5BFull * 0.0266072505979881, k5BFull * 0.0316227766016838,
+        k5BFull * 0.0375837404288444, k5BFull * 0.0446683592150963,
+        k5BFull * 0.0530884444230988, k5BFull * 0.0630957344480193,
+        k5BFull * 0.0749894209332456, k5BFull * 0.0891250938133746,
+        k5BFull * 0.1059253725177289, k5BFull * 0.1258925411794168,
+        k5BFull * 0.1496235656094433, k5BFull * 0.1778279410038923,
+        k5BFull * 0.2113489039836647, k5BFull * 0.2511886431509580,
+        k5BFull * 0.2985382618917959, k5BFull * 0.3548133892335755,
+        k5BFull * 0.4216965034285822, k5BFull * 0.5011872336272722,
+        k5BFull * 0.5956621435290105, k5BFull * 0.7079457843841379,
+        k5BFull * 0.8413951416451951, k5BFull * 1.0000000000000000,
     };
 
     int rate_ = 48000;

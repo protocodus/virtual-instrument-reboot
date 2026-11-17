@@ -102,6 +102,38 @@ double Expected(const MachineSettings& s, Voice voice, int channel, std::int64_t
     }
 }
 
+// The beeper's mean frequency over a note started at cycle 0, rendered for
+// `seconds` and measured from `skip`: the BEEPER loop's OUT ($FE) every
+// 4 HL + 118 T-states, the first 209 - 12 (L mod 4) after the call, each
+// held by the ULA (World of Spectrum, 48K and 128K references): its I/O
+// cycle's second T-state, 3 before the OUT ends, waits 6, 5, 4, 3, 2, 1, 0
+// or 0 T-states through the first 128 of each of the 192 screen lines,
+// from 14335 of the 48K's 69888 (224 a line) or 14361 of the 128K's 70908
+// (228 a line).
+double BeeperHz(int revision, std::int64_t hl, double seconds, double skip) {
+    const bool is128 = revision == Micro::k128K;
+    const double cpu = is128 ? 3546900.0 : 3500000.0;
+    const std::int64_t frame = is128 ? 70908 : 69888, line = is128 ? 228 : 224, first = is128 ? 14361 : 14335;
+    const auto held = [&](std::int64_t end) {
+        const std::int64_t at = (end - 3) % frame;
+        if (at < first || at >= first + 192 * line || (at - first) % line >= 128)
+            return end;
+        const std::int64_t k = (at - first) % line % 8;
+        return end + (k < 6 ? 6 - k : 0);
+    };
+    std::int64_t out = held(209 - 12 * (hl & 3)), from = -1, to = -1, count = 0;
+    while (static_cast<double>(out) < seconds * cpu) {
+        if (static_cast<double>(out) >= skip * cpu) {
+            if (from < 0)
+                from = out;
+            to = out;
+            ++count;
+        }
+        out = held(out + 4 * hl + 118);
+    }
+    return 0.5 * static_cast<double>(count - 1) * cpu / static_cast<double>(to - from);
+}
+
 struct Render {
     std::vector<float> left, right;
 };
@@ -216,10 +248,16 @@ void TestPitch(Machine& m) {
                     note.period = period;
                     note.volume = 15;
                     note.shape = shape;
-                    const Render r = Play(m, setup.settings, part.first, note, f < 60.0 ? 2.5 : 1.2, Path::Pin);
+                    const double seconds = f < 60.0 ? 2.5 : 1.2;
+                    const Render r = Play(m, setup.settings, part.first, note, seconds, Path::Pin);
                     const double got = Measure(r.left, f, kRate, 0.3);
-                    Check(got > 0.0 && std::fabs(Cents(got, f)) < 0.5,
-                          what + ": plays " + std::to_string(got) + " Hz, the documents give " + std::to_string(f));
+                    // The ULA slows the beeper's loop; the period is still
+                    // chosen on the loop's own timing, as BEEP chooses it.
+                    const double want = setup.settings.board == BoardKind::Micro && part.first == Micro::kBeeper
+                                            ? BeeperHz(setup.settings.revision, period, seconds, 0.3)
+                                            : f;
+                    Check(got > 0.0 && std::fabs(Cents(got, want)) < 0.5,
+                          what + ": plays " + std::to_string(got) + " Hz, the documents give " + std::to_string(want));
                 }
                 Check(measured >= 3, std::string(setup.name) + " channel " + std::to_string(part.first)
                                          + ": too few notes measured (" + std::to_string(measured) + ")");
@@ -296,16 +334,18 @@ void TestLevels(Machine& m) {
     }
 
     // The cartridges against the APU's pulse at 15, as Boards/Console.h
-    // cites them: VRC6 and MMC5 as loud, the 5B as loud by our convention,
-    // the Namco 163's loudest square 12 dB over, the disk unit's 2.4 times.
+    // cites them: VRC6 and MMC5 as loud, a 5B square at volume 12 1.3 dB
+    // under (the db_5b survey), the Namco 163's loudest square 12 dB over,
+    // the disk unit's 2.4 times.
     const double famicomPulse = level(famicom, 0, Voice::Pulse, 440.0, 2);
-    const auto cart = [&](int expansion, int channels, Voice voice, int shape, double hz) {
+    const auto cart = [&](int expansion, int channels, Voice voice, int shape, double hz, int volume = 15) {
         const MachineSettings s { BoardKind::Console, 1, expansion, channels, 0 };
-        return level(s, Console::kApuChannels, voice, hz, shape) / famicomPulse;
+        return level(s, Console::kApuChannels, voice, hz, shape, volume) / famicomPulse;
     };
     Check(std::fabs(Db(cart(Console::kVrc6, 4, Voice::Pulse, 7, 440.0))) < 0.05, "vrc6 pulse level");
     Check(std::fabs(Db(cart(Console::kMmc5, 4, Voice::Pulse, 2, 440.0))) < 0.05, "mmc5 pulse level");
-    Check(std::fabs(Db(cart(Console::k5B, 4, Voice::Tone, 0, 440.0))) < 0.05, "5b tone level");
+    Check(std::fabs(Db(cart(Console::k5B, 4, Voice::Tone, 0, 440.0, 12)) + 1.3) < 0.05, "5b tone level at volume 12");
+    Check(std::fabs(Db(cart(Console::k5B, 4, Voice::Tone, 0, 440.0)) - 7.7) < 0.05, "5b tone level at volume 15");
     Check(std::fabs(Db(cart(Console::kN163, 1, Voice::Wave, 3, 440.0)) - 12.0) < 0.1, "n163 square level");
     // The disk unit's own 2 kHz low-pass takes a little of a 110 Hz square.
     const double fds = cart(Console::kFds, 4, Voice::ModWave, 3, 110.0);
@@ -401,7 +441,9 @@ void TestStopAndRates(Machine& m) {
             late = std::fmax(late, std::fabs(tail[i]));
         Check(late < 1.0e-3, std::string(setup.name) + ": still sounding half a second after Stop (" + std::to_string(late) + ")");
 
-        const double f = Expected(setup.settings, part.voice, part.first, n.period, 1);
+        const bool beeper = setup.settings.board == BoardKind::Micro && part.first == Micro::kBeeper;
+        const double f = beeper ? BeeperHz(setup.settings.revision, n.period, 1.0, 0.3)
+                                : Expected(setup.settings, part.voice, part.first, n.period, 1);
         for (int rate : { 44100, 96000, 192000 }) {
             m.Prepare(rate);
             m.Reset(setup.settings);

@@ -59,6 +59,9 @@ WAVs are rendered and committed by hand after a change that alters them.
   volume steps, vibrato, glide, bend) and eight demos.
 - Oversampling at 1x (the default), 2x, 4x or 8x, and Double: a second set
   of machines on the right, detuned against the first on the left.
+- Authenticity pass: the handheld's pulse and wave triggers as Pan Docs
+  states them, the 5B at its measured level (7.7 dB over the APU's pulse,
+  where it was set equal), and the ULA's contention of the beeper's loop.
 
 ## Downloads
 
@@ -105,8 +108,10 @@ state; the code is our own.
   the 512 Hz frame sequencer on the gbdev wiki's step map, on the
   4194304 Hz clock. Quirks Pan Docs states for each model: the first duty
   step after the first trigger plays as 0, the duty position survives a
-  trigger, the "zombie" volume write every unit agrees on ($08: one step
-  up). Revisions: the original (DMG) and the Color (CGB).
+  trigger, a pulse trigger keeps the low two bits of its frequency timer, a
+  wave trigger plays the sample buffer's high nibble before index 1, the
+  "zombie" volume write every unit agrees on ($08: one step up).
+  Revisions: the original (DMG) and the Color (CGB).
 - **DACs and mixer (spec):** a DAC on maps 0 to 15 to analog +1 to -1, off
   gives 0; NR51 sends channels to each side and NR50 scales the sides.
 - **Line (reported):** Pan Docs' coupling capacitor, factor 0.999958 per
@@ -125,8 +130,10 @@ state; the code is our own.
 - **Mixer (reported):** the wiki's nonlinear formulas,
   pulse = 95.88 / (8128 / (p1 + p2) + 100) and tnd = 159.79 /
   (1 / (t / 8227 + n / 12241 + d / 22638) + 100), which the page calls
-  approximate. **Bias** sets the DMC's held level, which moves the triangle
-  and noise through that mixer.
+  approximate; Brad Smith's DAC measurements of a front-loader and a
+  Famicom found its curves "reasonably good", with variance between units
+  (NESdev forum t=24288). **Bias** sets the DMC's held level, which moves
+  the triangle and noise through that mixer.
 - **Line (reported):** the front-loader's first-order high-pass at 90 Hz
   and low-pass at 14 kHz; the Famicom's high-pass at 37 Hz. The PAL
   console takes the NTSC front-loader's, unsourced.
@@ -144,8 +151,9 @@ state; the code is our own.
   each chip's wiki page reports: the VRC6 at the APU pulse's level and
   inverted, the MMC5 equal and inverted, the 163 12 dB over the APU's
   square (the page gives 11 to 13), the disk unit at 2.4 times a square.
-  The 5B's level is unsourced; by our convention its loudest channel equals
-  the APU's pulse.
+  The 5B's is Brad Smith's survey (nes-audio-tests, db_5b): its square at
+  volume 12 measured 1.3 dB under the APU's at full volume, so its loudest
+  channel is 7.7 dB over the APU's pulse.
 
 ### The PSG (Sega Master System and Game Gear, TI computer)
 
@@ -175,10 +183,17 @@ state; the code is our own.
   MIC state on an Issue 2 and an Issue 3. Notes run the ROM's BEEPER loop:
   the first OUT 209 - 12 (L mod 4) T-states after the call, then one every
   4 HL + 118, and a key-up lets the loop finish its cycle, as BEEPER does.
-  The loop's HL is ours: the value nearest in pitch on the machine's own
-  clock, not the BEEP command's 437500 / f - 30.125, which assumes 3.5 MHz
-  and plays 23 cents sharp on the 128K. Revisions: the 128K, the 48K Issue
-  3 and the 48K Issue 2.
+- **ULA contention (spec):** the ROM is not contended but port $FE is, so
+  each OUT waits as World of Spectrum's 48K and 128K references give it
+  (the N:1, C:3 pattern; 6, 5, 4, 3, 2, 1, 0, 0 T-states through the first
+  128 of each screen line, from T-state 14335 of the 48K's frame and 14361
+  of the 128K's). The loop runs slower and unevenly while the screen is
+  drawn, 50 times a second, as on the machine.
+- The loop's HL is ours: the value nearest in pitch on the loop's own
+  timing, not the BEEP command's 437500 / f - 30.125, which assumes 3.5 MHz
+  and plays 23 cents sharp on the 128K. Neither counts the contention,
+  which leaves the top octave flat by up to 9 cents on the 48K and 16 on
+  the 128K. Revisions: the 128K, the 48K Issue 3 and the 48K Issue 2.
 - **Line:** no speaker or socket stage is modelled, so Line renders as Pin.
 
 ### The band-limited renderer
@@ -294,17 +309,20 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   amplifier, headphone socket and speaker; any line stage of the PSG boards
   and the micro; the micro's speaker. Their Line renders as Pin.
 - **The handheld.** The DAC's fade when it turns off ("varies between
-  models", Pan Docs), the zombie writes other than $08, the wave channel's
-  start-up delay and the low two period bits a pulse trigger keeps are not
-  modelled. The Color's capacitor factor puts its high-pass corner near
+  models", Pan Docs), the zombie writes other than $08 and the wave
+  channel's start-up delay are not modelled. The Color's capacitor factor puts its high-pass corner near
   706 Hz, which thins everything it plays; we take Pan Docs' figure as
   reported until a capture settles it.
 - **The console.** The APU mixer is the wiki's approximation; the PAL
   console's line stage is the NTSC front-loader's, assumed. The MMC5 is
   mixed linearly at the APU pulse's step (our reading of "equivalent in
   volume"); the 163's level is the middle of a reported range and its
-  polarity unstated; the disk unit's page still has open questions; the
-  5B's level against the APU is our convention.
+  polarity unstated; the disk unit's page still has open questions. The
+  5B's level is one cartridge's measurement, and its amplifier, which "becomes
+  nonlinear at higher amplitudes, and includes some filtering" (NESdev
+  Wiki), is not modelled: no curve is published, only a high-pass fit in
+  a forum post (NESdev forum p=225726: 12 and 20 Hz) whose place against
+  the Famicom's own 37 Hz stage is not stated.
 - **The PSG.** Two volume tables are published for Sega's consoles and they
   disagree; we use SMS Power's 2 dB steps. The Master System 2's output
   clipping is not modelled.
@@ -312,11 +330,15 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   interact on the real board; here they sum independently. The 128K's
   beeper pin and its mix with the AY are unsourced: it takes the Issue 3's
   levels, and by our convention the beeper's swing equals one AY channel at
-  full volume. ULA contention, which stretches the BEEPER loop on the real
-  machine, is not modelled.
+  full volume. Pin 28 falls slowly after EAR goes low (World of Spectrum:
+  180 to 2800 T-states to cross 0.70 V, by how long it was high); that is
+  reported only as read timings, not as a circuit, so the pin steps at
+  once. Some machines run every ULA timing one T-state later than the
+  references; ours are the references'.
 - **Ours, by design.** The playing layer, the handheld's wave counts past
   2048, the noise pitch rule (a key picks the noise's colour), the period
-  nearest in pitch, the beeper's HL, the 5 Hz Pin blocker, the per-board
+  nearest in pitch, the beeper's HL, the frame's phase at reset, the 5 Hz
+  Pin blocker, the per-board
   level reference, Double's detune and oversampling's decimator are ours,
   not the hardware's.
 - **Presets are not level-matched.** The demos span about -37 to -16 dBFS
