@@ -633,6 +633,28 @@ void TestTouch() {
     const Audio d = Play(*e, { Bend(0, 1.0), On(0, 62) }, 24000);
     const double a4 = 131072.0 / 298.0;   // D4 bent up a fifth
     Check(std::fabs(Cents(Measure(d.left, a4, 48000.0, 6000, 24000), a4)) < 1.0, "bend: a full bend is not its range");
+
+    // The host's master tuning reaches a held note: A4 at +50 cents, then
+    // -30. Out of range it stops at 100 cents, and NaN plays at pitch. Each
+    // is heard at the pulse's nearest period, 131072 / (2048 - x) Hz.
+    c[kBendRange] = 2;
+    const auto t = Fresh(c);
+    const auto heard = [](double cents) {
+        const double hz = 440.0 * std::pow(2.0, cents / 1200.0);
+        return 131072.0 / std::round(131072.0 / hz);
+    };
+    const auto at = [&](double cents, const std::vector<Event>& ev) {
+        const Audio played = Play(*t, ev, 24000);
+        return std::fabs(Cents(Measure(played.left, heard(cents), 48000.0, 6000, 24000), heard(cents))) < 1.0;
+    };
+    t->SetTune(50.0);
+    Check(at(50.0, { On(0, 69) }), "tune: +50 cents does not reach A4");
+    t->SetTune(-30.0);
+    Check(at(-30.0, {}), "tune: -30 cents does not reach a held A4");
+    t->SetTune(1.0e9);
+    Check(at(100.0, {}), "tune: past 100 cents is not 100");
+    t->SetTune(std::nan(""));
+    Check(at(0.0, {}), "tune: NaN is not at pitch");
 }
 
 void TestBounds() {

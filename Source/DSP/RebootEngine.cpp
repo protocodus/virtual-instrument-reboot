@@ -1,5 +1,6 @@
 #include "RebootEngine.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace protocodus::reboot {
@@ -261,6 +262,8 @@ void Engine::SetSustain(bool down) {
 // NaN lands at the bottom of the range.
 void Engine::SetBend(double amount) { bend_ = amount > -1.0 ? (amount < 1.0 ? amount : 1.0) : -1.0; }
 void Engine::SetWheel(double amount) { wheel_ = amount > 0.0 ? (amount < 1.0 ? amount : 1.0) : 0.0; }
+// NaN plays at pitch rather than a semitone flat.
+void Engine::SetTune(double cents) { tune_ = std::isfinite(cents) ? std::clamp(cents, -100.0, 100.0) : 0.0; }
 
 void Engine::ReleaseAll() {
     sustain_ = false;
@@ -541,7 +544,7 @@ void Engine::StepEnvelope(Slot& n) const noexcept {
 
 double Engine::Pitch(const Slot& n, double cents) const {
     const Layer& L = layers_[n.layer];
-    double semitones = n.key + L.transpose + (L.fine + cents) / 100.0 + n.glide + bend_ * bendRange_;
+    double semitones = n.key + L.transpose + (L.fine + cents + tune_) / 100.0 + n.glide + bend_ * bendRange_;
     const double depth = vibratoDepth_ + 50.0 * wheel_;
     if (depth > 0.0 && n.frames > vibratoDelay_)
         semitones += depth / 100.0 * std::sin(6.283185307179586 * n.phase);

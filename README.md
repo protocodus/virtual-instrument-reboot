@@ -56,7 +56,8 @@ WAVs are rendered and committed by hand after a change that alters them.
 - The handheld, console, PSG and micro boards with their revisions, the
   Famicom's five cartridge chips, the band-limited step renderer, the
   playing layer (two layers, Poly, Mono and Arp, envelopes in the chip's
-  volume steps, vibrato, glide, bend) and eight demos.
+  volume steps, vibrato, glide, bend, the host's master tuning) and eight
+  demos.
 - Oversampling at 1x (the default), 2x, 4x or 8x, and Double: a second set
   of machines on the right, detuned against the first on the left.
 - Authenticity pass: the handheld's pulse and wave triggers as Pan Docs
@@ -251,8 +252,8 @@ and it only writes values the chips accept.
   below the pulses' 54.6 Hz; the PSG's periodic-noise bass below its tones'
   109 Hz.
 - **Frames.** Everything that moves while a note sounds (the envelope's
-  volume steps, vibrato, glide, the pitch wheel, the arpeggio) is written at
-  the machine's frame, as a game's driver ran on its video frame: 59.73 Hz
+  volume steps, vibrato, glide, the pitch wheel, the host's master tuning,
+  the arpeggio) is written at the machine's frame, as a game's driver ran on its video frame: 59.73 Hz
   on the handheld, 60.10 or 50.01 Hz on the console, 59.92 Hz on the PSG,
   50.02 or 50.08 Hz on the micro. A note's own start and end land on its
   sample.

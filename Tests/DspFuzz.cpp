@@ -48,8 +48,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
             engine->SetControls(controls);
             break;
         case 5:
-            if (input.Byte() & 1) engine->SetBend(input.Scalar());
-            else engine->SetWheel(input.Scalar());
+            switch (input.Pick(3)) {
+                case 0: engine->SetBend(input.Scalar()); break;
+                case 1: engine->SetWheel(input.Scalar()); break;
+                default: engine->SetTune(input.Scalar() * 200.0 - 100.0); break;
+            }
             break;
         case 6:
             // Keys called directly, out of range included.

@@ -64,6 +64,9 @@ public:
     void SetSustain(bool down);
     void SetBend(double amount);   // -1 .. 1
     void SetWheel(double amount);  // 0 .. 1
+    // The host's master tuning, -100 .. 100 cents, on every note, held ones
+    // too; no MIDI message carries it.
+    void SetTune(double cents);
     void ReleaseAll();             // every key up, the pedal up
     void Panic();                  // every channel silent at once
 
@@ -166,7 +169,7 @@ private:
     int vibratoDelay_ = 0, glideFrames_ = 0;
     double vibratoDepth_ = 0.0, vibratoStep_ = 0.0, velocity_ = 0.5, gain_ = 0.0;
     double frameHz_ = 60.0;
-    double bend_ = 0.0, wheel_ = 0.0;
+    double bend_ = 0.0, wheel_ = 0.0, tune_ = 0.0;
     bool sustain_ = false;
     std::uint64_t age_ = 0;
 
