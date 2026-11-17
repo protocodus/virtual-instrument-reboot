@@ -1,0 +1,148 @@
+#pragma once
+
+// Reboot's engine: up to eight machines of one board, the playing layer that
+// writes their registers (ours, README How it works) and the portfolio's
+// output stage.
+//
+// The playing layer is a sound driver of our own. A note's writes land on
+// the cycle its MIDI event maps to; everything that moves while a note
+// sounds (the envelope's volume steps, vibrato, glide, the pitch wheel, the
+// arpeggio) is written at the machine's frame, as a game's driver ran on
+// its video frame. Pitch is always a period register, so the chip's own
+// quantisation, out-of-tune top notes and stepped vibrato are what is heard.
+//
+// Real time: Process, Midi, the note calls and SetControls neither allocate
+// nor lock. Prepare is setup. A change of board, revision, expansion,
+// expansion channels or machine count resets the machines and plays the
+// held keys again on them; a change of mode, a layer's On or its Part plays
+// the held keys again on the machines as they are.
+
+#include "Driver/Machine.h"
+#include "OutputStage.h"
+#include "RebootControls.h"
+
+#include <array>
+#include <cstdint>
+
+namespace protocodus::reboot {
+
+class Engine {
+public:
+    static constexpr int kMaxBoards = 8;
+    static constexpr int kSlots = kMaxBoards * Machine::kMaxChannels;
+    // Ours: one channel at full volume, a 50 % square, reads -24 dBFS RMS
+    // on every board before Volume, so a four-channel chord at the
+    // factory levels sits near -9 VU on Reason's meter.
+    static constexpr double kReferenceRms = 0.063095734448019;
+
+    // Setup, not real time. The rate is taken to the nearest whole hertz.
+    void Prepare(double sampleRate);
+
+    void SetControls(const Controls& controls);   // any values: each is taken into its range
+    [[nodiscard]] const Controls& GetControls() const noexcept { return controls_; }
+
+    // A channel message (any MIDI channel), applied at the start of the next
+    // Process call.
+    void Midi(const std::uint8_t* bytes, int size);
+    void NoteOn(int key, int velocity);
+    void NoteOff(int key);
+    void SetSustain(bool down);
+    void SetBend(double amount);   // -1 .. 1
+    void SetWheel(double amount);  // 0 .. 1
+    void ReleaseAll();             // every key up, the pedal up
+    void Panic();                  // every channel silent at once
+
+    // Writes `frames` stereo samples.
+    void Process(float* left, float* right, int frames);
+
+    // The step buffer's kernel centre, then the output stage's look-ahead.
+    [[nodiscard]] int LatencySamples() const noexcept { return blep::kDelay + stage_.DelaySamples(); }
+    [[nodiscard]] int Boards() const noexcept { return boards_; }
+    [[nodiscard]] const Machine& MachineAt(int board) const noexcept { return machines_[board]; }
+    // Notes holding a channel, released ones included.
+    [[nodiscard]] int Sounding() const noexcept;
+
+private:
+    // Scoped: the layer controls kAttack and kDecay share the names.
+    enum class Stage { Attack, Decay, Sustained, Released };
+
+    struct Layer {
+        bool on = false;
+        int part = 0, shape = 0, level = 0;
+        int attack = 0, decay = 0, sustain = 0, release = 0;
+        int transpose = 0, mod = 0;
+        double fine = 0.0;
+    };
+
+    // A channel of a machine, and the note it plays.
+    struct Slot {
+        bool busy = false;
+        bool gate = false;       // the key still holds it
+        bool started = false;    // the channel has been started for this note
+        int key = 0, velocity = 0, layer = 0;
+        Voice voice = Voice::Pulse;
+        Stage stage = Stage::Attack;
+        int step = 0, count = 0;
+        double glide = 0.0;      // semitones still to go
+        int glideLeft = 0;       // frames to go
+        int frames = 0;          // frames since the note began
+        double phase = 0.0;      // vibrato, in cycles
+        std::uint64_t age = 0;   // when it began, or was freed
+        int claim = -1;          // the slot it takes over as well, or -1
+        int claimedBy = -1;      // the slot taking it over, or -1
+        ChannelSettings written;
+    };
+
+    struct Key {
+        int key = 0, velocity = 0;
+        bool down = false;       // false: held only by the pedal
+    };
+
+    static int Channel(int slot) noexcept { return slot % Machine::kMaxChannels; }
+    Machine& MachineOf(int slot) noexcept { return machines_[slot / Machine::kMaxChannels]; }
+
+    void Apply(bool reset, bool revoice);
+    void Revoice(bool reset);
+    void Strike(int key, int velocity);
+    void Lift(int key);
+    int StartNote(int layer, int key, int velocity, double glide);
+    void Retarget(int slot, int key, int velocity, bool glide);
+    void ReleaseSlot(int slot);
+    void End(int slot);
+    void Settle(Slot& n) const noexcept;
+    void StepEnvelope(Slot& n) const noexcept;
+    [[nodiscard]] double Pitch(const Slot& n) const;
+    [[nodiscard]] int Volume(const Slot& n) const noexcept;
+    bool Compose(int slot, ChannelSettings& s) const;
+    void Write(int slot);
+    void Tick();
+    [[nodiscard]] int ArpKey(int index) const noexcept;
+    [[nodiscard]] int HeldIndex(int key) const noexcept;
+
+    Machine machines_[kMaxBoards];
+    Slot slots_[kSlots];
+    Key held_[128];
+    int heldCount_ = 0;
+    int mono_[kLayers] = { -1, -1 };    // Mono and Arp: each layer's note
+    int arpIndex_ = 0, arpCount_ = 0;
+
+    Controls controls_;
+    MachineSettings settings_;
+    Layer layers_[kLayers];
+    int rate_ = 48000;
+    int boards_ = 2;
+    Path path_ = Path::Line;
+    int mode_ = 0, arpRate_ = 2, bendRange_ = 2;
+    int vibratoDelay_ = 0, glideFrames_ = 0;
+    double vibratoDepth_ = 0.0, vibratoStep_ = 0.0, velocity_ = 0.5, gain_ = 0.0;
+    double frameHz_ = 60.0;
+    double bend_ = 0.0, wheel_ = 0.0;
+    bool sustain_ = false;
+    std::uint64_t age_ = 0;
+
+    std::int64_t tickNum_ = 0, periodNum_ = 1, periodDen_ = 1;
+
+    OutputStage<2> stage_;
+};
+
+} // namespace protocodus::reboot
