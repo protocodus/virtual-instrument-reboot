@@ -512,6 +512,27 @@ void TestPedalAndPanic() {
     }
 }
 
+// A host's audio reset leaves every board as Prepare does: what follows is
+// the same bits a fresh engine plays, the pedal and held keys gone, the
+// filters and the output stage's look-ahead at rest. One preset of each
+// board, one doubled, at 1x and 4x.
+void TestReset() {
+    for (std::size_t p : { 0, 4, 9, 13 }) {
+        for (int factor : { 1, 4 }) {
+            Controls c = kPresets[p].ToControls();
+            if (p == 13)
+                c[kDouble] = 1;
+            const auto e = Fresh(c, 48000.0, factor);
+            Play(*e, { On(0, 60), On(0, 67), Cc(10, 64, 127), Off(20, 60), Bend(30, 0.0) }, 9000);
+            e->Reset();
+            const Audio a = Play(*e, Phrase(), 48000);
+            const Audio b = Play(*Fresh(c, 48000.0, factor), Phrase(), 48000);
+            Check(a.left == b.left && a.right == b.right,
+                  std::string(kPresets[p].name) + " at " + std::to_string(factor) + "x: a reset does not play as a fresh engine");
+        }
+    }
+}
+
 // The level about its own mean between two samples, so the Pin blocker's
 // slow drift while a level moves does not count.
 double AcRms(const std::vector<float>& x, std::size_t from, std::size_t to) {
@@ -734,6 +755,7 @@ int main() {
     TestVoices();
     TestModes();
     TestPedalAndPanic();
+    TestReset();
     TestEnvelope();
     TestHeldWaves();
     TestTouch();

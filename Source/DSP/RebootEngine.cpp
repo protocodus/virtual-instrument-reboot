@@ -280,6 +280,17 @@ void Engine::Panic() {
         End(s);
 }
 
+void Engine::Reset() {
+    sustain_ = false;
+    heldCount_ = 0;
+    arpIndex_ = arpCount_ = 0;
+    for (Decimator& d : decimators_)
+        d.Reset();
+    stage_.Reset();
+    // The machines reset, and the slots cleared with them.
+    Apply(true, true);
+}
+
 int Engine::Sounding() const noexcept {
     int n = 0;
     for (const Slot& s : slots_)

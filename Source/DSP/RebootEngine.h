@@ -69,6 +69,10 @@ public:
     void SetTune(double cents);
     void ReleaseAll();             // every key up, the pedal up
     void Panic();                  // every channel silent at once
+    // A host's audio reset: every key and the pedal up, and every machine,
+    // filter and the output stage back at rest, as Prepare leaves them.
+    // Real time; the controls, wheels and tuning stay as they are.
+    void Reset();
 
     // Writes `frames` stereo samples.
     void Process(float* left, float* right, int frames);
