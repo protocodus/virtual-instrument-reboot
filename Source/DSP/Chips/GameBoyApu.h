@@ -127,6 +127,18 @@ public:
             sink(now_);
     }
 
+    // Ours, not the hardware's: `extension` more counts on the wave
+    // channel's 11-bit period counter, so the keys under its lowest note
+    // (32 Hz) sound at their own pitch (Boards/Handheld.h). 0 is the chip.
+    template <class Sink>
+    void SetWaveExtension(int extension, Sink& sink) {
+        CatchUpAll();
+        wave_.extension = extension;
+        wave_.SetPeriod(wave_.period);
+        if (Update())
+            sink(now_);
+    }
+
     // Wave RAM, as a sound driver loads it with the DAC off.
     void LoadWave(const std::uint8_t (&bytes)[16]) noexcept {
         for (int i = 0; i < 16; ++i)
@@ -191,12 +203,13 @@ private:
         bool on = false, dac = false;
         std::uint8_t level = 0, position = 0, sample = 0;   // NR32 bits 6-5
         std::uint16_t period = 0;
+        int extension = 0;                        // ours: SetWaveExtension
         Length length;
         Divider timer { 0, 2 * 2048 };
         bool live = false;
         void SetPeriod(int p) noexcept {
             period = static_cast<std::uint16_t>(p & 0x7FF);
-            timer.period = 2 * (2048 - period);   // 2097152 Hz divider clock
+            timer.period = 2 * (2048 - period + extension);   // 2097152 Hz divider clock
         }
     };
 
