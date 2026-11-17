@@ -13,7 +13,7 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Rereboot has no plug-in yet, so there is no plugin-macos job, no package and
+# Reboot has no plug-in yet, so there is no plugin-macos job, no package and
 # no main-build or release workflow: every job builds the JUCE-free engine.
 jobs:
   dsp-tests:
@@ -41,7 +41,7 @@ jobs:
           cmake -S . -B build-dsp -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           "-DPython3_EXECUTABLE=${{ steps.python.outputs.python-path }}" -DREBOOT_REQUIRE_PYTHON_TESTS=ON
 
-      # The default build includes RerebootDSPCxx17, the Rack toolchain's C++17
+      # The default build includes RebootDSPCxx17, the Rack toolchain's C++17
       # and -fno-builtin check.
       - name: Build
         run: cmake --build build-dsp --parallel
@@ -56,7 +56,7 @@ jobs:
         run: ctest --test-dir build-dsp -L '^perf$' --no-tests=error --output-on-failure
 
       - name: Render the demos for review
-        run: ./build-dsp/RenderRerebootPresetDemos --jobs 4 Docs/audio/midi build-dsp/demo-audio
+        run: ./build-dsp/RenderRebootPresetDemos --jobs 4 Docs/audio/midi build-dsp/demo-audio
 
       - name: Upload demo audio and CPU figures
         uses: actions/upload-artifact@v4
@@ -135,7 +135,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The fuzz tier is Rereboot.DspFuzz, the libFuzzer target over the
+      # The fuzz tier is Reboot.DspFuzz, the libFuzzer target over the
       # instrumented DSP. REBOOT_ENABLE_SANITIZERS adds -fsanitize=address,undefined,float-cast-overflow
       # -fno-sanitize-recover=all -fno-omit-frame-pointer to every target.
       - name: Configure the instrumented DSP, tests and libFuzzer target
