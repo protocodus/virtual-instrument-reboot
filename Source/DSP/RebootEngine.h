@@ -11,14 +11,21 @@
 // its video frame. Pitch is always a period register, so the chip's own
 // quantisation, out-of-tune top notes and stepped vibrato are what is heard.
 //
+// Oversampling renders the machines at 2, 4 or 8 times the host rate and
+// decimates them back (Render/Decimator.h); Double runs a second set of
+// machines that mirrors every register write of the first, detuned, the
+// first set on the left and the second on the right (ours, README How it
+// works).
+//
 // Real time: Process, Midi, the note calls and SetControls neither allocate
 // nor lock. Prepare is setup. A change of board, revision, expansion,
-// expansion channels or machine count resets the machines and plays the
-// held keys again on them; a change of mode, a layer's On or its Part plays
-// the held keys again on the machines as they are.
+// expansion channels, machine count or Double resets the machines and plays
+// the held keys again on them; a change of mode, a layer's On or its Part
+// plays the held keys again on the machines as they are.
 
 #include "Driver/Machine.h"
 #include "OutputStage.h"
+#include "Render/Decimator.h"
 #include "RebootControls.h"
 
 #include <array>
@@ -35,8 +42,16 @@ public:
     // factory levels sits near -9 VU on Reason's meter.
     static constexpr double kReferenceRms = 0.063095734448019;
 
-    // Setup, not real time. The rate is taken to the nearest whole hertz.
-    void Prepare(double sampleRate);
+    // The highest rate the machines run at: oversampling is halved until
+    // they run at or under it (Prepare). Past it, the steps' band limit and
+    // the boards' analog stages are already far above hearing, and only the
+    // CPU would grow.
+    static constexpr int kMaxInternalRate = 384000;
+
+    // Setup, not real time. The rate is taken to the nearest whole hertz;
+    // `oversampling` is 1, 2, 4 or 8 (another value, the largest of those
+    // under it, and at least 1).
+    void Prepare(double sampleRate, int oversampling = 1);
 
     void SetControls(const Controls& controls);   // any values: each is taken into its range
     [[nodiscard]] const Controls& GetControls() const noexcept { return controls_; }
@@ -55,8 +70,14 @@ public:
     // Writes `frames` stereo samples.
     void Process(float* left, float* right, int frames);
 
-    // The step buffer's kernel centre, then the output stage's look-ahead.
-    [[nodiscard]] int LatencySamples() const noexcept { return blep::kDelay + stage_.DelaySamples(); }
+    // The step buffer's kernel centre at the machines' rate, the
+    // decimator's stages, then the output stage's look-ahead: whole host
+    // samples at every factor (Tools/generate_halfband.py).
+    [[nodiscard]] int LatencySamples() const noexcept {
+        return blep::kDelay / oversampling_ + Decimator::DelayFor(oversampling_) + stage_.DelaySamples();
+    }
+    // The factor the machines run at, after kMaxInternalRate.
+    [[nodiscard]] int Oversampling() const noexcept { return oversampling_; }
     [[nodiscard]] int Boards() const noexcept { return boards_; }
     [[nodiscard]] const Machine& MachineAt(int board) const noexcept { return machines_[board]; }
     // Notes holding a channel, released ones included.
@@ -91,6 +112,7 @@ private:
         int claim = -1;          // the slot it takes over as well, or -1
         int claimedBy = -1;      // the slot taking it over, or -1
         ChannelSettings written;
+        ChannelSettings twin;    // what the Double set's channel was last sent
     };
 
     struct Key {
@@ -100,6 +122,7 @@ private:
 
     static int Channel(int slot) noexcept { return slot % Machine::kMaxChannels; }
     Machine& MachineOf(int slot) noexcept { return machines_[slot / Machine::kMaxChannels]; }
+    Machine& TwinOf(int slot) noexcept { return twins_[slot / Machine::kMaxChannels]; }
 
     void Apply(bool reset, bool revoice);
     void Revoice(bool reset);
@@ -111,15 +134,19 @@ private:
     void End(int slot);
     void Settle(Slot& n) const noexcept;
     void StepEnvelope(Slot& n) const noexcept;
-    [[nodiscard]] double Pitch(const Slot& n) const;
+    [[nodiscard]] double Pitch(const Slot& n, double cents = 0.0) const;
+    // Cents each set plays off the note: the first set down, the Double set up.
+    [[nodiscard]] double Spread() const noexcept { return double_ ? detune_ / 2.0 : 0.0; }
     [[nodiscard]] int Volume(const Slot& n) const noexcept;
-    bool Compose(int slot, ChannelSettings& s) const;
+    bool Compose(int slot, ChannelSettings& s, double cents = 0.0) const;
+    void Send(int slot, const ChannelSettings& s, bool start);
     void Write(int slot);
     void Tick();
     [[nodiscard]] int ArpKey(int index) const noexcept;
     [[nodiscard]] int HeldIndex(int key) const noexcept;
 
     Machine machines_[kMaxBoards];
+    Machine twins_[kMaxBoards];          // the Double set
     Slot slots_[kSlots];
     Key held_[128];
     int heldCount_ = 0;
@@ -130,6 +157,9 @@ private:
     MachineSettings settings_;
     Layer layers_[kLayers];
     int rate_ = 48000;
+    int oversampling_ = 1;
+    bool double_ = false;
+    double detune_ = 0.0;
     int boards_ = 2;
     Path path_ = Path::Line;
     int mode_ = 0, arpRate_ = 2, bendRange_ = 2;
@@ -142,6 +172,9 @@ private:
 
     std::int64_t tickNum_ = 0, periodNum_ = 1, periodDen_ = 1;
 
+    Decimator decimators_[2];
+    // The machines' left and right at their own rate, then the Double set's.
+    float bus_[4][StepBuffer::kMaxFrames] {};
     OutputStage<2> stage_;
 };
 

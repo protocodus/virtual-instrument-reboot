@@ -35,6 +35,8 @@ enum Control : int {
     kVolume,            // output level, dB: our trim after the machines (README, How it works)
     kAOn, kAPart, kAShape, kALevel, kAAttack, kADecay, kASustain, kARelease, kATranspose, kAFine, kAMod,
     kBOn, kBPart, kBShape, kBLevel, kBAttack, kBDecay, kBSustain, kBRelease, kBTranspose, kBFine, kBMod,
+    kDouble,            // 0 one set of machines; 1 a second set too, the first left and the second right
+    kDetune,            // cents between the two sets with Double, half of it either way
     kControlCount
 };
 
@@ -106,6 +108,8 @@ inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "b_transpose", "B Transpose", -24.0, 24.0, 0.0, 0, Curve::kInteger, "semitones" },
     { "b_fine", "B Fine", -50.0, 50.0, 0.0, 0, Curve::kLinear, "cents" },
     { "b_mod", "B Mod", 0.0, 63.0, 0.0, 0, Curve::kInteger, "" },
+    { "double", "Double", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
+    { "detune", "Detune", 0.0, 50.0, 8.0, 0, Curve::kLinear, "cents" },
 } };
 
 // The value of control `index` at normalised position n (clamped to 0..1).

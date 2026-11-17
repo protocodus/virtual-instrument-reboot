@@ -70,9 +70,9 @@ Audio Play(Engine& e, const std::vector<Event>& events, int frames, int block = 
     return a;
 }
 
-std::unique_ptr<Engine> Fresh(const Controls& c, double rate = 48000.0) {
+std::unique_ptr<Engine> Fresh(const Controls& c, double rate = 48000.0, int oversampling = 1) {
     auto e = std::make_unique<Engine>();
-    e->Prepare(rate);
+    e->Prepare(rate, oversampling);
     e->SetControls(c);
     return e;
 }
@@ -279,6 +279,116 @@ void TestKeyboard() {
     }
 }
 
+// The engine's latency at 48 kHz and the kernel's 16 samples of ringing.
+constexpr std::size_t kLate = 128;
+
+// Oversampling renders the machines at 2, 4 or 8 times the rate and brings
+// them back through the halfband stages: the pitch and level of 1x, the note
+// starting at the latency reported, the same bits however the host cuts its
+// blocks, and the factor halved until the machines run at or under 384 kHz.
+void TestOversampling() {
+    const double want = 131072.0 / 298.0;
+    for (double rate : { 44100.0, 48000.0, 96000.0 }) {
+        const int frames = static_cast<int>(rate);
+        const auto from = static_cast<std::size_t>(frames / 5), to = static_cast<std::size_t>(frames);
+        const Audio one = Play(*Fresh(Plain(0), rate), { On(0, 69) }, frames);
+        for (int factor : { 2, 4, 8 }) {
+            const std::string at = std::to_string(factor) + "x at " + std::to_string(rate) + " Hz";
+            const auto e = Fresh(Plain(0), rate, factor);
+            int expect = factor;
+            while (expect > 1 && rate * expect > Engine::kMaxInternalRate)
+                expect /= 2;
+            Check(e->Oversampling() == expect, at + " runs at " + std::to_string(e->Oversampling()) + "x");
+            const Audio a = Play(*e, { On(0, 69) }, frames);
+            Check(a.left != one.left, at + " renders the same samples as 1x");
+            Check(std::fabs(Cents(Measure(a.left, want, rate, from, to), want)) < 0.3, at + ": A4 is out of tune");
+            Check(std::fabs(Db(Rms(a.left, from, to)) - Db(Rms(one.left, from, to))) < 0.05, at + ": the level moves");
+            std::size_t first = 0;
+            while (std::fabs(a.left[first]) <= 0.5 * 0.0631)
+                ++first;
+            const auto latency = static_cast<std::size_t>(e->LatencySamples());
+            // The decimator's delay is whole host samples, so the onset is
+            // exactly where it is at 1x, moved by the reported latency.
+            Check(first == latency,
+                  at + ": the note starts at " + std::to_string(first) + ", not the latency " + std::to_string(latency));
+        }
+    }
+    for (int factor : { 0, 3, 5, 100, -1 }) {
+        const auto e = Fresh(Plain(0), 48000.0, factor);
+        const int expect = factor >= 8 ? 8 : factor >= 4 ? 4 : factor >= 2 ? 2 : 1;
+        Check(e->Oversampling() == expect, "oversampling " + std::to_string(factor) + " is not taken as " + std::to_string(expect));
+    }
+    // One preset of each board, and one doubled, cut into other blocks.
+    for (std::size_t p : { 0, 4, 9, 13 }) {
+        Controls c = kPresets[p].ToControls();
+        if (p == 13)
+            c[kDouble] = 1;
+        const Audio a = Play(*Fresh(c, 48000.0, 8), Phrase(), 48000, 256);
+        Check(Finite(a), std::string(kPresets[p].name) + " at 8x: not finite");
+        for (int block : { 1, 77 }) {
+            const Audio b = Play(*Fresh(c, 48000.0, 8), Phrase(), 48000, block);
+            Check(a.left == b.left && a.right == b.right,
+                  std::string(kPresets[p].name) + " at 8x: blocks of " + std::to_string(block) + " change the output");
+        }
+    }
+    // Every board keeps its keys in tune at 8x.
+    for (int board = 0; board < 4; ++board) {
+        for (int key = 21; key <= 108; key += 11) {
+            Controls c;
+            c[kBoard] = board;
+            const Audio a = Play(*Fresh(c, 48000.0, 8), { On(0, key) }, 24000);
+            const double hz = 440.0 * std::pow(2.0, (key - 69) / 12.0);
+            const double got = Measure(a.left, hz, 48000.0, 6000, 24000);
+            Check(got > 0.0 && std::fabs(Cents(got, hz)) < 40.0,
+                  "board " + std::to_string(board) + " key " + std::to_string(key) + " at 8x plays " + std::to_string(got) + " Hz");
+        }
+    }
+}
+
+// Double: a second set of machines mirrors every note, the first set on the
+// left and the second on the right, each half the detune off the note.
+void TestDouble() {
+    // With no detune each side is one set's own sound, bit for bit, on
+    // every board, through bends, vibrato, the pedal and releases.
+    for (int board = 0; board < 4; ++board) {
+        Controls c;
+        c[kBoard] = board;
+        const Audio one = Play(*Fresh(c), Phrase(), 96000);
+        c[kDouble] = 1;
+        c[kDetune] = 0;
+        const Audio two = Play(*Fresh(c), Phrase(), 96000);
+        Check(one.left == one.right, "board " + std::to_string(board) + " is not centred");
+        Check(two.left == one.left && two.right == one.left,
+              "board " + std::to_string(board) + ": Double with no detune is not the single set on both sides");
+    }
+    // A3's period on the handheld moves 2.9 cents a step, so each side sits
+    // within 3 cents of its half of a 20 cent detune.
+    Controls c = Plain(0);
+    c[kDouble] = 1;
+    c[kDetune] = 20;
+    const Audio a = Play(*Fresh(c), { On(0, 57) }, 48000);
+    const double a3 = 220.0;
+    const double left = Measure(a.left, a3, 48000.0, 9600, 48000), right = Measure(a.right, a3, 48000.0, 9600, 48000);
+    Check(std::fabs(Cents(left, a3) + 10.0) < 3.0, "Double's left plays A3 at " + std::to_string(Cents(left, a3)) + " cents");
+    Check(std::fabs(Cents(right, a3) - 10.0) < 3.0, "Double's right plays A3 at " + std::to_string(Cents(right, a3)) + " cents");
+    // Turned on under a held key, Double plays it on both sides; after the
+    // key, both sides fall silent.
+    Controls single = Plain(0);
+    single[kARelease] = 0;
+    const auto e = Fresh(single);
+    std::vector<float> l(48000), r(48000);
+    const std::uint8_t on[] = { 0x90, 64, 100 }, off[] = { 0x80, 64, 0 };
+    e->Midi(on, 3);
+    e->Process(l.data(), r.data(), 4800);
+    single[kDouble] = 1;
+    e->SetControls(single);
+    e->Process(l.data() + 4800, r.data() + 4800, 19200);
+    e->Midi(off, 3);
+    e->Process(l.data() + 24000, r.data() + 24000, 24000);
+    Check(Rms(r, 12000, 24000) > 0.03 && Rms(l, 12000, 24000) > 0.03, "Double turned on under a held key is not heard on both sides");
+    Check(Settles(l, 24000 + kLate + 804) && Settles(r, 24000 + kLate + 804), "Double's sides do not stop with the key");
+}
+
 void TestVoices() {
     // Two machines' two pulses: four voices, the oldest stolen.
     {
@@ -370,9 +480,6 @@ void TestModes() {
         }
     }
 }
-
-// The engine's latency at 48 kHz and the kernel's 16 samples of ringing.
-constexpr std::size_t kLate = 128;
 
 void TestPedalAndPanic() {
     Controls c = Plain(0);
@@ -600,6 +707,8 @@ int main() {
     TestReferenceLevel();
     TestRates();
     TestKeyboard();
+    TestOversampling();
+    TestDouble();
     TestVoices();
     TestModes();
     TestPedalAndPanic();

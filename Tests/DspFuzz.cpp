@@ -16,7 +16,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     Input input { data, size };
 
     auto engine = std::make_unique<rb::Engine>();
-    engine->Prepare(input.Rate());
+    // Any host rate at 1x, 2x, 4x or 8x.
+    engine->Prepare(input.Rate(), 1 << input.Pick(4));
     rb::Controls controls = rb::kPresets[input.Pick(rb::kPresets.size())].ToControls();
     engine->SetControls(controls);
 

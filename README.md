@@ -57,6 +57,8 @@ WAVs are rendered and committed by hand after a change that alters them.
   Famicom's five cartridge chips, the band-limited step renderer, the
   playing layer (two layers, Poly, Mono and Arp, envelopes in the chip's
   volume steps, vibrato, glide, bend) and eight demos.
+- Oversampling at 1x (the default), 2x, 4x or 8x, and Double: a second set
+  of machines on the right, detuned against the first on the left.
 
 ## Downloads
 
@@ -192,6 +194,35 @@ integers (`Render/Timebase.h`), so nothing drifts however long it plays. A
 channel that cannot be heard is not stepped at all: its counters and noise
 register are jumped ahead exactly when it can be (`Chips/Lfsr.h`).
 
+### Oversampling and Double (ours)
+
+- **Oversampling** renders the machines at 2, 4 or 8 times the host rate and
+  brings them back through one to three 2:1 halfband stages (67 taps, flat
+  to 0.2 and at least 98 dB down from 0.3 of each stage's input rate, from
+  `Tools/generate_halfband.py`). The steps are then band-limited at the
+  higher rate, and the boards' analog stages, whose corners are designed by
+  the bilinear transform, sit further from that rate's Nyquist. Below 19.2
+  kHz at 48 kHz the result is within 0.05 dB of 1x. The factor is halved
+  until the machines run at or under 384 kHz, so 8x at 96 kHz runs at 4x.
+  It is setup, not a control (`Engine::Prepare`), and starts at 1x. Each
+  stage delays by whole host samples, so the latency is 16 samples at 1x,
+  then 24, 28 and 30 at 2x, 4x and 8x, plus the output stage's 96 at 48
+  kHz.
+- **Double** runs a second set of machines that takes every register write
+  of the first, with its note half the Detune up while the first plays half
+  of it down. The first set plays on the left and the second on the right,
+  each folded to mono at the level one side of a single set has: two
+  machines side by side, as chip musicians play two handhelds live. Here
+  the two sets share one clock and start together, so with no detune each
+  side is the single set's sound, bit for bit; the detune is ours. Where it
+  takes a note out of a channel's reach, the second set plays the first
+  set's period. A change of Double resets the machines.
+- **CPU** on the development container (Release, GCC 13.3), six held keys
+  on each preset at 48 kHz: 0.16 % of a core on average and 0.9 % at worst
+  (Disk Organ's four consoles) at 1x; 1.1 % and 2.4 % at 8x; with Double,
+  0.28 % and 1.8 % at 1x, 1.5 % and 3.9 % at 8x. These are not Reason's
+  figures.
+
 ### The playing layer (ours)
 
 The layer that turns keys into register writes is a sound driver of our own,
@@ -241,6 +272,7 @@ and it only writes values the chips accept.
 | Bias | 0 to 127 | the console's held DMC level |
 | Path | Pin, Line | the chips' DACs and mixer, or the machine's output stage |
 | Boards | 1 to 8 | machines played at once |
+| Double, Detune | Off, On; 0 to 50 cents | a second set of machines on the right, its notes Detune above the first set's on the left |
 | Mode | Poly, Mono, Arp | how keys take voices |
 | Arp rate | 1 to 8 frames | frames an arpeggio step holds |
 | Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz, 0 to 1000 ms | written at the frame; the mod wheel adds up to 50 cents |
@@ -251,6 +283,7 @@ and it only writes values the chips accept.
 | A and B: On, Part, Shape | per board | the layer, the channels it plays, their duty, wave, noise mode or envelope shape |
 | A and B: Level, Attack, Decay, Sustain, Release | 0 to 15, 0 to 30 frames a step | the envelope in the chip's volume steps |
 | A and B: Transpose, Fine, Mod | ±24 semitones, ±50 cents, 0 to 63 | pitch, and the disk unit's modulation depth |
+| Oversampling | 1x, 2x, 4x, 8x | setup, not a control: the machines' rate over the host's (`Engine::Prepare`) |
 
 The control ids, ranges and defaults are `Source/DSP/RebootControls.h`, which
 every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
@@ -283,8 +316,9 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   machine, is not modelled.
 - **Ours, by design.** The playing layer, the handheld's wave counts past
   2048, the noise pitch rule (a key picks the noise's colour), the period
-  nearest in pitch, the beeper's HL, the 5 Hz Pin blocker and the per-board
-  level reference are ours, not the hardware's.
+  nearest in pitch, the beeper's HL, the 5 Hz Pin blocker, the per-board
+  level reference, Double's detune and oversampling's decimator are ours,
+  not the hardware's.
 - **Presets are not level-matched.** The demos span about -37 to -16 dBFS
   RMS: a quiet Color pulse through its 706 Hz corner, a four-console disk
   organ. A preset Volume trim from a level tool is to come.

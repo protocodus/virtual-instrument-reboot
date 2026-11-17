@@ -54,7 +54,9 @@ set(REBOOT_DSP_HEADERS
     Source/DSP/RebootEngine.h
     Source/DSP/RebootPresets.h
     Source/DSP/Render/BlepKernel.h
+    Source/DSP/Render/Decimator.h
     Source/DSP/Render/Filters.h
+    Source/DSP/Render/HalfbandKernel.h
     Source/DSP/Render/StepBuffer.h
     Source/DSP/Render/Timebase.h)
 
@@ -184,6 +186,9 @@ if(BUILD_TESTING)
         add_test(NAME Reboot.Waves
                  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tools/generate_waves.py"
                          --check "${CMAKE_CURRENT_SOURCE_DIR}/Source/DSP/Driver/Waves.h")
+        add_test(NAME Reboot.HalfbandKernel
+                 COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tools/generate_halfband.py"
+                         --check "${CMAKE_CURRENT_SOURCE_DIR}/Source/DSP/Render/HalfbandKernel.h")
         # The committed demo phrases are what the writer writes (G3a).
         add_test(NAME Reboot.DemoMidiSources
                  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tools/write_preset_midi.py" --check)

@@ -114,7 +114,8 @@ public:
                 rule.with.push_back({ static_cast<std::size_t>(s.first), Normalised(s.first, s.second) });
         };
         const int control = static_cast<int>(index);
-        const int layer = control >= kBOn ? 1 : 0;
+        const bool layered = control >= kAOn && control <= kBMod;
+        const int layer = layered && control >= kBOn ? 1 : 0;
         const int base = kLayerBase[layer];
         if (layer == 1 && control != kBOn)
             with({ { kBOn, 1 } });
@@ -170,10 +171,21 @@ public:
             rule.reach = Reach::NewNotes;
             rule.reason = "the range scales the pitch wheel, which rests while the chord is held; the probes bend";
             break;
+        case kDouble:
+            // Double resets every machine at the change, so the two sets'
+            // pulses take their duty steps and frame sequencers from there,
+            // where the run held at 1 has played them all along (Pan Docs:
+            // a trigger leaves the duty step where it was).
+            rule.history = "the sets' pulses keep the duty steps and frame phases since their last reset";
+            break;
+        case kDetune:
+            // The detune parts the two sets, so it is heard only with Double.
+            with({ { kDouble, 1 } });
+            break;
         default:
             break;
         }
-        if (control >= kAOn) {
+        if (layered) {
             switch (control - base) {
             case kAttack:
                 rule.reach = Reach::NewNotes;

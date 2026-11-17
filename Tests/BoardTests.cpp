@@ -4,6 +4,7 @@
 // chose, a level against the DAC and mixer figures the boards cite.
 
 #include "DSP/Driver/Machine.h"
+#include "DSP/Render/Decimator.h"
 
 #include <cmath>
 #include <cstdint>
@@ -414,7 +415,82 @@ void TestStopAndRates(Machine& m) {
 
 } // namespace
 
+// The two generated kernels, measured from their coefficients. The step
+// kernel's 257 phases together sample its impulse every 1/256 of a sample,
+// so their sum of tones is its response at any frequency; the halfband's
+// taps are its response at its input rate.
+void TestKernels() {
+    const auto stepResponse = [](double f) {
+        double re = 0.0, im = 0.0;
+        for (int p = 0; p < blep::kPhases; ++p)
+            for (int j = 0; j < blep::kTaps; ++j) {
+                const double t = j - blep::kDelay - static_cast<double>(p) / blep::kPhases;
+                const double v = blep::kTable[p][j] / static_cast<double>(1 << blep::kUnitBits);
+                re += v * std::cos(2.0 * 3.141592653589793 * f * t);
+                im -= v * std::sin(2.0 * 3.141592653589793 * f * t);
+            }
+        return 20.0 * std::log10(std::hypot(re, im) / blep::kPhases + 1.0e-30);
+    };
+    for (int p = 0; p <= blep::kPhases; ++p) {
+        std::int64_t sum = 0;
+        for (int j = 0; j < blep::kTaps; ++j)
+            sum += blep::kTable[p][j];
+        Check(sum == (std::int64_t { 1 } << blep::kUnitBits), "step kernel phase " + std::to_string(p) + " does not sum to 1");
+    }
+    // Flat to 0.4 of the rate, at least 99 dB down from 0.6 to 4 times it
+    // (Tools/generate_blep.py).
+    for (int i = 0; i <= 80; ++i) {
+        const double f = 0.4 * i / 80.0;
+        Check(std::fabs(stepResponse(f)) < 0.001, "step kernel at " + std::to_string(f) + " of the rate: " + std::to_string(stepResponse(f)) + " dB");
+    }
+    for (int i = 0; i <= 680; ++i) {
+        const double f = 0.6 + 3.4 * i / 680.0;
+        Check(stepResponse(f) < -99.0, "step kernel at " + std::to_string(f) + " of the rate: " + std::to_string(stepResponse(f)) + " dB");
+    }
+
+    const auto halfResponse = [](double f) {
+        double h = 0.5;
+        for (int k = 0; k < halfband::kSideTaps; ++k)
+            h += 2.0 * halfband::kSide[k] * std::cos(2.0 * 3.141592653589793 * f * (2 * k + 1));
+        return 20.0 * std::log10(std::fabs(h) + 1.0e-30);
+    };
+    // Flat to 0.2 of the stage's input rate, at least 98 dB down from 0.3
+    // to its Nyquist (Tools/generate_halfband.py).
+    for (int i = 0; i <= 200; ++i) {
+        const double f = 0.2 * i / 200.0, db = halfResponse(f);
+        Check(std::fabs(db) < 0.001, "halfband at " + std::to_string(f) + " of its rate: " + std::to_string(db) + " dB");
+    }
+    for (int i = 0; i <= 200; ++i) {
+        const double f = 0.3 + 0.2 * i / 200.0, db = halfResponse(f);
+        Check(db < -98.0, "halfband at " + std::to_string(f) + " of its rate: " + std::to_string(db) + " dB");
+    }
+    // The decimator passes a tone at its level and folds nothing back: a
+    // 1 kHz tone and a 30 kHz one through the 8x chain at 48 kHz.
+    for (double hz : { 1000.0, 30000.0 }) {
+        Decimator d;
+        d.Prepare(8);
+        std::vector<float> x(8 * 4800);
+        for (std::size_t i = 0; i < x.size(); ++i)
+            x[i] = static_cast<float>(std::sin(2.0 * 3.141592653589793 * hz * static_cast<double>(i) / 384000.0));
+        for (std::size_t at = 0; at < x.size(); at += 256)
+            d.Process(x.data() + at, 32);
+        std::vector<float> y(4800);
+        for (std::size_t i = 0; i < 150; ++i)
+            for (int k = 0; k < 32; ++k)
+                y[i * 32 + static_cast<std::size_t>(k)] = x[i * 256 + static_cast<std::size_t>(k)];
+        double sum = 0.0;
+        for (std::size_t i = 480; i < y.size(); ++i)
+            sum += static_cast<double>(y[i]) * y[i];
+        const double db = 10.0 * std::log10(sum / static_cast<double>(y.size() - 480) * 2.0 + 1.0e-30);
+        if (hz < 20000.0)
+            Check(std::fabs(db) < 0.01, "the decimator moves a 1 kHz tone by " + std::to_string(db) + " dB");
+        else
+            Check(db < -95.0, "the decimator folds a 30 kHz tone back at " + std::to_string(db) + " dB");
+    }
+}
+
 int main() {
+    TestKernels();
     auto machine = std::make_unique<Machine>();
     TestPitch(*machine);
     TestRanges(*machine);
