@@ -1,0 +1,324 @@
+# Reboot
+
+Reboot is a sound-chip synthesizer: the sound hardware of four 8-bit
+machines, emulated from the published specifications of their chips and
+played from a keyboard. The handheld board is the APU from the Game Boy and
+Game Boy Color; the console board the 2A03 from the NES and Famicom (the
+2A07 on the PAL console), with the Famicom's cartridge chips beside it:
+Konami's VRC6, Nintendo's MMC5, Namco's 163, the Famicom Disk System's wave
+unit and Sunsoft's 5B; the PSG board the SN76489 in Sega's Master System and
+Game Gear and in Texas Instruments' computer; the micro board the
+AY-3-8912 and the beeper from the ZX Spectrum 128K, and the 48K's beeper
+alone. Every chip is an integer core that runs on its machine's own clock,
+and a keyboard plays it through register writes, as a game's sound driver
+did, so the chip's own pitch steps, volume steps and quirks are what is
+heard. This repository holds the JUCE-free C++17 engine, its tools and its
+tests. Reboot is being built as a Rack Extension for Reason, which plays this
+engine; a plug-in front end is not built yet, and this repository has no
+release.
+
+## Audio demos
+
+Eight of the sixteen factory presets, each playing a phrase written for it
+(`Tools/write_preset_midi.py`, committed in `Docs/audio/midi/`) through the
+shipping engine as the preset loads: a square lead on the handheld's pulse
+with a delayed vibrato, an arpeggio on the Game Boy Color's pulse, two
+detuned pulses gliding on the console, the VRC6's sawtooth, the disk unit's
+modulated wave on four consoles, the PSG's periodic-noise bass under its own
+tone, the AY's envelope buzzing as a bass, and a melody on the Spectrum's
+one-bit beeper.
+
+<!-- audio-demos-begin -->
+
+| # | Preset | Demo | Length | Peak |
+| --- | --- | --- | --- | --- |
+| 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -11.4 dBFS |
+| 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -19.2 dBFS |
+| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -10.1 dBFS |
+| 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -15.5 dBFS |
+| 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -4.8 dBFS |
+| 10 | Periodic Bass | [10-periodic-bass.wav](Docs/audio/10-periodic-bass.wav) | 8.3 s | -19.1 dBFS |
+| 13 | Buzz Bass | [13-buzz-bass.wav](Docs/audio/13-buzz-bass.wav) | 8.3 s | -14.9 dBFS |
+| 14 | One-Bit Melody | [14-one-bit-melody.wav](Docs/audio/14-one-bit-melody.wav) | 8.4 s | -14.2 dBFS |
+
+<!-- audio-demos-end -->
+
+`build-dsp/RenderRebootPresetDemos Docs/audio/midi <out-dir>` renders them,
+48 kHz 24-bit stereo, with the `demos.json` from which `python3
+Tools/update_readme_blocks.py demos --readme README.md --manifest
+<out-dir>/demos.json` writes the table. There is no main build yet, so the
+WAVs are rendered and committed by hand after a change that alters them.
+
+## Version history
+
+### 0.1.0 — 2026-11-17 — first pass: four boards, five cartridge chips, sixteen presets
+
+- The handheld, console, PSG and micro boards with their revisions, the
+  Famicom's five cartridge chips, the band-limited step renderer, the
+  playing layer (two layers, Poly, Mono and Arp, envelopes in the chip's
+  volume steps, vibrato, glide, bend) and eight demos.
+
+## Downloads
+
+There is no build to download yet.
+
+---
+
+## How it works
+
+**The signal path.** A key becomes register writes on the cycle its MIDI
+event falls on. The chip core runs from event to event on its master clock
+and gives each channel's DAC code whenever one changes; the board turns the
+codes into levels with its DAC and mixer, which is a list of steps in time,
+exact to the clock cycle. The steps are band-limited to the host's rate, then
+pass either the board's own output stage (**Line**) or only a DC blocker
+(**Pin**), then Volume and the portfolio's output stage.
+
+```
+keys ─▶ playing layer ─▶ register writes at chip cycles ─▶ chip core (integer, event to event)
+     ─▶ DAC codes ─▶ board DAC and mixer ─▶ steps ─▶ band-limited at the host rate
+     ─▶ Pin: 5 Hz DC blocker │ Line: the machine's output stage ─▶ Volume ─▶ limiter at -1.5 dBFS
+```
+
+**Where every value comes from.** Each mechanism carries one of these tags
+in the code beside it, and nothing is filled in with a plausible number: a
+stage that no source describes is left out and listed under Known gaps.
+
+| Tag | Meaning |
+| --- | --- |
+| spec | stated by the maker's documents or an authoritative technical reference (Pan Docs, the NESdev Wiki, SMS Power, the AY data manual, World of Spectrum's tech notes) |
+| reported | a measurement or fit someone else published, cited beside the code; it ships labelled until our own measurement replaces it |
+| ours | the playing layer and the conventions that let a keyboard play the chips; never claimed as hardware |
+
+No die-level netlist was read, no emulator's code was copied, and no
+copyleft or non-commercial source was read. Ayumi (MIT), MAME's ay8910 and
+sn76496 (BSD-3-Clause) and the documents above were read for the rules they
+state; the code is our own.
+
+### The handheld (Game Boy, Game Boy Color)
+
+- **Chip (spec):** Pan Docs (CC0): two pulses with four duties, the first
+  with its period sweep, a 32-sample 4-bit wave channel, a noise channel
+  with its 15- and 7-bit LFSR, the length counters, volume envelopes and
+  the 512 Hz frame sequencer on the gbdev wiki's step map, on the
+  4194304 Hz clock. Quirks Pan Docs states for each model: the first duty
+  step after the first trigger plays as 0, the duty position survives a
+  trigger, the "zombie" volume write every unit agrees on ($08: one step
+  up). Revisions: the original (DMG) and the Color (CGB).
+- **DACs and mixer (spec):** a DAC on maps 0 to 15 to analog +1 to -1, off
+  gives 0; NR51 sends channels to each side and NR50 scales the sides.
+- **Line (reported):** Pan Docs' coupling capacitor, factor 0.999958 per
+  clock on the original and 0.998943 on the Color, held while every DAC is
+  off. The amplifier, headphone socket and speaker are not modelled.
+
+### The console (NES, Famicom, PAL NES)
+
+- **Chip (spec):** the NESdev Wiki's APU pages: two pulses with sweep, the
+  triangle, the noise channel's two modes, the DMC's held level, the
+  envelopes, length counters and the frame counter, in CPU cycles at the
+  NTSC 1789773 Hz (19687500 / 11) or the PAL 1662607 Hz, with the PAL
+  2A07's own noise and DMC period tables. A pulse period change that crosses the high
+  bits writes $4003 or $4007, as a driver must, and the phase reset it
+  forces is heard.
+- **Mixer (reported):** the wiki's nonlinear formulas,
+  pulse = 95.88 / (8128 / (p1 + p2) + 100) and tnd = 159.79 /
+  (1 / (t / 8227 + n / 12241 + d / 22638) + 100), which the page calls
+  approximate. **Bias** sets the DMC's held level, which moves the triangle
+  and noise through that mixer.
+- **Line (reported):** the front-loader's first-order high-pass at 90 Hz
+  and low-pass at 14 kHz; the Famicom's high-pass at 37 Hz. The PAL
+  console takes the NTSC front-loader's, unsourced.
+- **Cartridge chips (spec, levels reported):** they sound only on the
+  Famicom revision, whose cartridge slot returns audio (NESdev Wiki,
+  "Expansion audio"). Expansion A is the VRC6 (two pulses with eight
+  duties, the accumulating sawtooth, the halt and 16x/256x frequency
+  bits); B the MMC5 (two pulses without sweep; its PCM channel is not
+  played); C the Namco 163 (one to
+  eight wavetable channels in 128 bytes of RAM, updated one every 15 CPU
+  cycles through one DAC, so eight channels whine as the chip does); D the
+  disk unit (a 64-step wave, its modulator with its 32-step table, the
+  master volume and its own low-pass); E the 5B (the AY core at a 16-cycle
+  tick with its 1.5 dB DAC steps). Their levels against the APU are what
+  each chip's wiki page reports: the VRC6 at the APU pulse's level and
+  inverted, the MMC5 equal and inverted, the 163 12 dB over the APU's
+  square (the page gives 11 to 13), the disk unit at 2.4 times a square.
+  The 5B's level is unsourced; by our convention its loudest channel equals
+  the APU's pulse.
+
+### The PSG (Sega Master System and Game Gear, TI computer)
+
+- **Chip (spec):** SMS Power's SN76489 notes and MAME's sn76496 (for the
+  per-variant widths and taps): three square tones and a noise generator on
+  3579545 Hz, counters moving every 16th clock, a period of 0 counting as
+  1 on Sega's parts and 1024 on TI's, Sega's 16-bit noise register tapped
+  at bits 0 and 3 and TI's 15-bit one at 0 and 1. Revisions: the Sega
+  console (mono), the Sega handheld (the same chip with its stereo
+  register) and the TI computer.
+- **DAC (reported, disputed for Sega):** 2 dB a step of attenuation, 15
+  silent, the four channels summed. Below the tones' lowest note the board
+  plays the chip's own bass trick: periodic noise clocked by tone 3 at its
+  rate, tone 3 silent.
+- **Line:** no line stage is known for any of the three, so Line renders as
+  Pin.
+
+### The micro (ZX Spectrum 128K, 48K)
+
+- **AY-3-8912 (spec, DAC reported):** the AY data manual's registers,
+  mixer and envelope shapes, with Ayumi's counter rule and 17-bit noise
+  register (MAME's ay8910 agrees), on half the 128K's 3546900 Hz. The
+  envelope runs as the YM2149's 32 steps; the AY's DAC, Ayumi's table, gives
+  each pair of codes one level, which is the AY's 16-step output.
+- **Beeper (spec, levels reported):** the ULA's port $FE bits that drive
+  pin 28, with World of Spectrum's measured pin voltages for each EAR and
+  MIC state on an Issue 2 and an Issue 3. Notes run the ROM's BEEPER loop:
+  the first OUT 209 - 12 (L mod 4) T-states after the call, then one every
+  4 HL + 118, and a key-up lets the loop finish its cycle, as BEEPER does.
+  The loop's HL is ours: the value nearest in pitch on the machine's own
+  clock, not the BEEP command's 437500 / f - 30.125, which assumes 3.5 MHz
+  and plays 23 cents sharp on the 128K. Revisions: the 128K, the 48K Issue
+  3 and the 48K Issue 2.
+- **Line:** no speaker or socket stage is modelled, so Line renders as Pin.
+
+### The band-limited renderer
+
+A board's output is exactly a list of steps, each on a clock cycle. Each step
+adds a band-limited impulse (a Kaiser-windowed sinc, beta 10, 33 taps, 256
+phases, from `Tools/generate_blep.py`) into a difference buffer in integer
+units, and integrating it gives the steps at the host's rate: no aliasing
+folds back below half the host rate, every phase sums to exactly one, so the
+level returns exactly after any number of steps, and the output is the same
+bits on every processor. The machine clock and the host rate meet in exact
+integers (`Render/Timebase.h`), so nothing drifts however long it plays. A
+channel that cannot be heard is not stepped at all: its counters and noise
+register are jumped ahead exactly when it can be (`Chips/Lfsr.h`).
+
+### The playing layer (ours)
+
+The layer that turns keys into register writes is a sound driver of our own,
+and it only writes values the chips accept.
+
+- **Pitch** is a period register, chosen as the one nearest in pitch (in
+  ratio, not in count), so the chip's quantisation and out-of-tune top notes
+  are its own. A key below a part's reach goes to its board's fallback: the
+  handheld's wave channel below the pulses' 64 Hz, extended by more counts
+  than its 11-bit register holds down to A0 (ours); the console's triangle
+  below the pulses' 54.6 Hz; the PSG's periodic-noise bass below its tones'
+  109 Hz.
+- **Frames.** Everything that moves while a note sounds (the envelope's
+  volume steps, vibrato, glide, the pitch wheel, the arpeggio) is written at
+  the machine's frame, as a game's driver ran on its video frame: 59.73 Hz
+  on the handheld, 60.10 or 50.01 Hz on the console, 59.92 Hz on the PSG,
+  50.02 or 50.08 Hz on the micro. A note's own start and end land on its
+  sample.
+- **Envelopes** step the chip's volume one step every Attack, Decay or
+  Release frames, through the chip's own volume register (the handheld's
+  by the zombie write); Level and velocity scale that register too. On the
+  handheld's and the console's linear DACs a step is a fixed amplitude; on
+  the PSG's, the AY's and the 5B's logarithmic ones it is a fixed number of
+  decibels, so the same envelope falls faster in level there, as a driver's
+  did. The micro's Buzz part plays the AY's own envelope.
+- **Voices.** Up to eight machines of one board play at once (**Boards**);
+  a note takes the free channel of its layer's part, on any of them, that
+  was freed longest ago, else the oldest released note's, else the oldest
+  note's. Two layers, A and B, each choose a
+  part, shape, level, envelope, transpose and fine tune. **Mode** is Poly,
+  Mono (legato, with glide) or Arp (one voice stepping through the held
+  keys every Arp rate frames).
+- **Waves** for the wave channels are our own harmonic waves
+  (`Tools/generate_waves.py`), scaled to each chip's range.
+- **Level.** One channel playing a 50 % square at full volume reads -24
+  dBFS RMS on every board; Volume trims from there, and the portfolio's
+  output stage keeps every sample under -1.5 dBFS.
+
+### Controls
+
+| Control | Range | What it does |
+| --- | --- | --- |
+| Board | Handheld, Console, PSG, Micro | the machine |
+| Revision | per board (above) | the machine's model |
+| Expansion | none, A to E | the Famicom's cartridge chip |
+| Expansion channels | 1 to 8 | how many channels expansion C runs |
+| Bias | 0 to 127 | the console's held DMC level |
+| Path | Pin, Line | the chips' DACs and mixer, or the machine's output stage |
+| Boards | 1 to 8 | machines played at once |
+| Mode | Poly, Mono, Arp | how keys take voices |
+| Arp rate | 1 to 8 frames | frames an arpeggio step holds |
+| Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz, 0 to 1000 ms | written at the frame; the mod wheel adds up to 50 cents |
+| Glide | 0 to 1000 ms | a Mono legato note's slide |
+| Bend range | 0 to 12 semitones | the pitch wheel |
+| Velocity | 0 to 1 | how far a key's velocity scales the level |
+| Volume | -24 to +6 dB | our trim after the machines |
+| A and B: On, Part, Shape | per board | the layer, the channels it plays, their duty, wave, noise mode or envelope shape |
+| A and B: Level, Attack, Decay, Sustain, Release | 0 to 15, 0 to 30 frames a step | the envelope in the chip's volume steps |
+| A and B: Transpose, Fine, Mod | ±24 semitones, ±50 cents, 0 to 63 | pitch, and the disk unit's modulation depth |
+
+The control ids, ranges and defaults are `Source/DSP/RebootControls.h`, which
+every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
+
+## Known gaps
+
+- **Analog stages without a source are not modelled.** The handheld's
+  amplifier, headphone socket and speaker; any line stage of the PSG boards
+  and the micro; the micro's speaker. Their Line renders as Pin.
+- **The handheld.** The DAC's fade when it turns off ("varies between
+  models", Pan Docs), the zombie writes other than $08, the wave channel's
+  start-up delay and the low two period bits a pulse trigger keeps are not
+  modelled. The Color's capacitor factor puts its high-pass corner near
+  706 Hz, which thins everything it plays; we take Pan Docs' figure as
+  reported until a capture settles it.
+- **The console.** The APU mixer is the wiki's approximation; the PAL
+  console's line stage is the NTSC front-loader's, assumed. The MMC5 is
+  mixed linearly at the APU pulse's step (our reading of "equivalent in
+  volume"); the 163's level is the middle of a reported range and its
+  polarity unstated; the disk unit's page still has open questions; the
+  5B's level against the APU is our convention.
+- **The PSG.** Two volume tables are published for Sega's consoles and they
+  disagree; we use SMS Power's 2 dB steps. The Master System 2's output
+  clipping is not modelled.
+- **The micro.** The AY's three outputs are tied through resistors and
+  interact on the real board; here they sum independently. The 128K's
+  beeper pin and its mix with the AY are unsourced: it takes the Issue 3's
+  levels, and by our convention the beeper's swing equals one AY channel at
+  full volume. ULA contention, which stretches the BEEPER loop on the real
+  machine, is not modelled.
+- **Ours, by design.** The playing layer, the handheld's wave counts past
+  2048, the noise pitch rule (a key picks the noise's colour), the period
+  nearest in pitch, the beeper's HL, the 5 Hz Pin blocker and the per-board
+  level reference are ours, not the hardware's.
+- **Presets are not level-matched.** The demos span about -37 to -16 dBFS
+  RMS: a quiet Color pulse through its 706 Hz corner, a four-console disk
+  organ. A preset Volume trim from a level tool is to come.
+- **Not measured.** No value here is our own capture of real hardware yet;
+  every analog figure is reported. No one has listened to these demos
+  against the machines.
+- **The FM chips, the SID, OPM and OPLL are not here.** The FM console's
+  YM2612/YM3438 waits on public evidence of its output stage; the SID's
+  filter differs from chip to chip.
+
+## Build
+
+CMake 3.22 or newer and a C++20 compiler; the engine itself is C++17.
+
+```sh
+cmake -S . -B build-dsp -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build-dsp --parallel 2
+ctest --test-dir build-dsp -L unit --output-on-failure
+```
+
+`Reboot.Chips` checks every core against the documents' own formulas (duty,
+periods, envelope shapes, noise registers jumped against single steps) and
+that a core gives the same output however its run is cut and after any
+silence; `Reboot.Boards` the pitch, range and level of every board against
+independent formulas; `Reboot.Engine` the playing layer; `Reboot.ParameterReach`
+that every control reaches held and new notes. `Reboot.ParameterMatrix`
+(`fuzz`) and `Reboot.DspFuzz` (Clang, `-DREBOOT_BUILD_FUZZER=ON`) push every
+control to its extremes and the engine's input to garbage.
+
+## Licensing
+
+Reboot is source-available under the PolyForm Noncommercial License 1.0.0
+with an additional permission for official builds; see [LICENSE](LICENSE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Game Boy, NES, Famicom,
+Master System, Game Gear, ZX Spectrum and the chip names are trademarks of
+their owners, named here only to say which hardware is emulated; Reboot is
+not affiliated with or endorsed by any of them.
