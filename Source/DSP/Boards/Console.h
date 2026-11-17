@@ -40,13 +40,35 @@
 //   forum thread t=17741, read 2026-11-17; reported, one cartridge): a 5B
 //   square at volume 12 measured 1.3 dB under the APU's square at full
 //   volume, both 50 % duty, by RMS. Volume 12 is code 25, 9 dB under code
-//   31, so code 31 is 7.7 dB over the APU's pulse at 15. The page's "the
-//   amplifier becomes nonlinear at higher amplitudes, and includes some
-//   filtering" has no figures (Known gaps).
+//   31, so code 31 is 7.7 dB over the APU's pulse at 15.
 //
-// Line stage (NESdev Wiki, "APU Mixer", reported): the front-loader's
-// first-order high-pass at 90 Hz and low-pass at 14 kHz; the Famicom's
-// high-pass at 37 Hz. The PAL front-loader takes the NTSC one's, unsourced.
+// Line stage (NESdev Wiki, "APU Mixer", read 2026-11-17, reported): the
+// front-loader's first-order high-pass at 90 Hz and low-pass at 14 kHz
+// (the page's second-order low-pass is "comfortably above the audible
+// range"); the Famicom's high-pass at 37 Hz. The PAL front-loader takes
+// the NTSC one's, unsourced. Before it, on Line, a cartridge's own board:
+// - MMC5 (NESdev Wiki, "MMC5 audio", the HVC-ETROM-02 drawing, read
+//   2026-11-17; spec): the APU's audio from cartridge pin 45, the MMC5's
+//   DAC and its pulses each pass 15 kOhm and 100 nF into the inverting
+//   input of the MMC5's amplifier, 10 kOhm from its output back to that
+//   input, the output to pin 46. So everything the console plays is high-
+//   passed at 1 / (2 pi 15 k 100 n) = 106.1 Hz and scaled by -10 k / 15 k
+//   (taking the inverting input as a virtual ground, as the drawing's
+//   internal reference on + implies).
+// - 5B (rainwarrior's measurements of a Gimmick! cartridge, NESdev forum
+//   t=17745 and p=225726, September 2018, read 2026-11-17; reported, one
+//   cartridge): the APU's input high-passed at 12 Hz and the 5B's own
+//   channels at 20 Hz ("5B internal"), mixed in its amplifier, which is
+//   linear for one square "up to and including volume 14" and above that
+//   fits "a threshold set 1dB above volume 14 (or 7dB above volume 12),
+//   with a compression ratio of 2.7:1 dB" (a hard knee); its output then
+//   high-passed at 12 Hz. He found the onset "very immediate" and later
+//   "maybe this isn't so much a compressor as just a nonlinearity ... a
+//   highpass filter followed by the curve I already described". We apply
+//   that curve to the instantaneous amplitude after the input high-passes,
+//   so a centred square's peak, half its swing, meets the threshold at
+//   volume 14 plus 1 dB (our reading; README, Known gaps, for the soft knee
+//   he expected but did not publish).
 
 #include "../Chips/Ay8910.h"
 #include "../Chips/Famicom.h"
@@ -54,6 +76,7 @@
 #include "../Driver/Waves.h"
 #include "Board.h"
 
+#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 
@@ -72,6 +95,14 @@ public:
         rate_ = sampleRate;
         DesignPinBlocker(pinBlocker_, sampleRate);
         fdsLowPass_.Design(FirstOrder::Kind::LowPass, 2000.0, sampleRate);
+        mmc5Board_.Design(FirstOrder::Kind::HighPass, 1.0 / (2.0 * 3.141592653589793 * 15000.0 * 100e-9), sampleRate);
+        s5bApuIn_.Design(FirstOrder::Kind::HighPass, 12.0, sampleRate);
+        s5bInternal_.Design(FirstOrder::Kind::HighPass, 20.0, sampleRate);
+        s5bOut_.Design(FirstOrder::Kind::HighPass, 12.0, sampleRate);
+        // The 5B's curve above its threshold, (|x| / T)^(1 / 2.7), tabled here
+        // so no library call runs per sample.
+        for (int i = 0; i <= kCurveSteps; ++i)
+            curve5B_[i] = std::pow(1.0 + i * (kCurveTop - 1.0) / kCurveSteps, 1.0 / 2.7);
     }
 
     // n163Channels: how many channels the Namco 163 runs (1-8).
@@ -87,6 +118,10 @@ public:
         mix_.Clear();
         pinBlocker_.Reset();
         fdsLowPass_.Reset();
+        mmc5Board_.Reset();
+        s5bApuIn_.Reset();
+        s5bInternal_.Reset();
+        s5bOut_.Reset();
         for (Shadow& s : shadow_)
             s = Shadow {};
         highPass_.Design(FirstOrder::Kind::HighPass, revision == kFamicom ? 37.0 : 90.0, rate_);
@@ -258,12 +293,22 @@ public:
         float bus[2][StepBuffer::kMaxFrames] {};
         mix_.Read(0, bus[0], frames);
         mix_.Read(1, bus[1], frames);
+        // Bus 0 is the APU and every cartridge but the disk unit and the 5B;
+        // bus 1 is one of those two.
         for (int i = 0; i < frames; ++i) {
-            double x = bus[0][i] + fdsLowPass_.Process(bus[1][i]);
-            if (path == Path::Line)
+            const double cart = cartridge_ == kFds ? fdsLowPass_.Process(bus[1][i]) : bus[1][i];
+            double x;
+            if (path == Path::Line) {
+                if (cartridge_ == kMmc5)
+                    x = -10.0 / 15.0 * mmc5Board_.Process(bus[0][i]);
+                else if (cartridge_ == k5B)
+                    x = s5bOut_.Process(Amplify5B(s5bApuIn_.Process(bus[0][i]) + s5bInternal_.Process(cart)));
+                else
+                    x = bus[0][i] + cart;
                 x = lowPass_.Process(highPass_.Process(x));
-            else
-                x = pinBlocker_.Process(x);
+            } else {
+                x = pinBlocker_.Process(bus[0][i] + cart);
+            }
             left[i] += static_cast<float>(x);
             right[i] += static_cast<float>(x);
         }
@@ -542,6 +587,7 @@ private:
         case k5B:
             for (int c = 0; c < 3; ++c)
                 level += k5BLevel[s5b_.Out(c)];
+            bus = 1;
             break;
         default:
             break;
@@ -576,6 +622,27 @@ private:
         k5BFull * 0.8413951416451951, k5BFull * 1.0000000000000000,
     };
 
+    // The 5B amplifier's threshold: a code-29 (volume 14) square's peak once
+    // centred, half its swing, plus 1 dB: 10^(-2 / 20) / 2 of code 31.
+    static constexpr double k5BKnee = k5BFull * 0.3971641173621406;
+    // The curve's table runs to 32 times the threshold, past the loudest
+    // sum the APU and three 5B squares can reach (about 16); beyond, it
+    // continues along its last step.
+    static constexpr int kCurveSteps = 496;
+    static constexpr double kCurveTop = 32.0;
+
+    [[nodiscard]] double Amplify5B(double x) const noexcept {
+        const double a = x < 0.0 ? -x : x;
+        if (a <= k5BKnee)
+            return x;
+        const double u = (a / k5BKnee - 1.0) * (kCurveSteps / (kCurveTop - 1.0));
+        int i = static_cast<int>(u);
+        if (i > kCurveSteps - 1)
+            i = kCurveSteps - 1;
+        const double y = k5BKnee * (curve5B_[i] + (u - i) * (curve5B_[i + 1] - curve5B_[i]));
+        return x < 0.0 ? -y : y;
+    }
+
     int rate_ = 48000;
     int revision_ = kFrontLoader;
     int cartridge_ = kNone;
@@ -590,6 +657,8 @@ private:
     Timebase tb_;
     StepMix<2, 2> mix_;
     FirstOrder pinBlocker_, fdsLowPass_, highPass_, lowPass_;
+    FirstOrder mmc5Board_, s5bApuIn_, s5bInternal_, s5bOut_;
+    double curve5B_[kCurveSteps + 1] {};
     Shadow shadow_[kMaxChannels];
 };
 

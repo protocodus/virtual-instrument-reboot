@@ -381,6 +381,41 @@ void TestLevels(Machine& m) {
     const double fami = level(famicom, 2, Voice::Triangle, 60.0, 0, 15, Path::Line)
                         / level(famicom, 2, Voice::Triangle, 60.0, 0, 15, Path::Pin);
     Check(front < fami && fami < 1.0 && front > 0.5, "console line stages " + std::to_string(front) + " " + std::to_string(fami));
+    // A cartridge's board before the Famicom's stage. MMC5 (the HVC-ETROM-02
+    // drawing): everything through 15 kOhm and 100 nF into an inverting
+    // amplifier with 10 kOhm feedback, so a high note keeps 2/3 of its level,
+    // inverted, and a low one loses most of it below 106 Hz.
+    {
+        const MachineSettings mmc5 { BoardKind::Console, 1, Console::kMmc5, 4, 0 };
+        const auto line = [&](const MachineSettings& s, double hz) {
+            m.Prepare(kRate);
+            m.Reset(s);
+            return Play(m, s, 2, Note(m, 2, Voice::Triangle, hz, 0), 1.0, Path::Line).left;
+        };
+        const std::vector<float> plain = line(famicom, 880.0), board = line(mmc5, 880.0);
+        const double high = Rms(board, 0.3) / Rms(plain, 0.3);
+        Check(std::fabs(high - 2.0 / 3.0) < 0.02, "mmc5 board gain " + std::to_string(high));
+        double dot = 0.0;
+        for (std::size_t i = plain.size() / 2; i < plain.size(); ++i)
+            dot += static_cast<double>(plain[i]) * board[i];
+        Check(dot < 0.0, "the mmc5 board does not invert");
+        const double low = Rms(line(mmc5, 55.0), 0.3) / Rms(line(famicom, 55.0), 0.3);
+        Check(low < 0.5 * 2.0 / 3.0, "mmc5 board high-pass at 55 Hz " + std::to_string(low));
+    }
+    // 5B (rainwarrior's fit): linear for one square up to volume 14; at 15,
+    // 2 dB over the threshold, the 2.7:1 curve gives 0.74 dB, so the square
+    // comes out 1.26 dB under its linear level.
+    {
+        const MachineSettings s5b { BoardKind::Console, 1, Console::k5B, 4, 0 };
+        const auto ratio = [&](int volume) {
+            return level(s5b, Console::kApuChannels, Voice::Tone, 440.0, 0, volume, Path::Line)
+                   / level(s5b, Console::kApuChannels, Voice::Tone, 440.0, 0, volume);
+        };
+        const double v14 = ratio(14), v15 = ratio(15);
+        Check(std::fabs(Db(v14)) < 0.1, "5b amplifier at volume 14 " + std::to_string(Db(v14)));
+        const double squeeze = Db(v15 / v14), expected = 2.0 / 2.7 - 2.0;
+        Check(std::fabs(squeeze - expected) < 0.1, "5b amplifier at volume 15 " + std::to_string(squeeze) + " dB");
+    }
     const double cap = level(handheld, 0, Voice::Pulse, 440.0, 2, 15, Path::Line) / level(handheld, 0, Voice::Pulse, 440.0, 2);
     Check(cap > 0.97 && cap < 1.01, "handheld capacitor at 440 Hz " + std::to_string(cap));
     for (const MachineSettings& s : { MachineSettings { BoardKind::Psg, 0, 0, 4, 0 }, micro }) {

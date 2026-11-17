@@ -12,7 +12,9 @@
 // times its volume, 2 dB down a step of attenuation, 15 silent; the four
 // summed. MAME's sn76496.cpp negates the whole output of these parts, as
 // Inverted() reports. No line stage is known for any of the three, so Line
-// renders as Pin (README, Known gaps).
+// renders as Pin (README, Known gaps). The Sega console is the Master
+// System 1: the Master System 2 clips through a pull-up it added (TmEE's
+// scope photos, NESdev forum t=15562; reported) at a level no source gives.
 //
 // Below the tones' lowest note (A2 - 10 cents, at a period of 1023) the
 // board's bass is the chip's own trick: periodic noise clocked by tone 3

@@ -15,7 +15,10 @@
 // by NR50's volume + 1 over 8. Pin is that sum. Line adds the capacitor:
 // Pan Docs' out = in - capacitor, capacitor = in - out * factor, factor
 // 0.999958 per clock on the original and 0.998943 on the Color (reported),
-// with the output 0 and the capacitor held while every DAC is off. The
+// with the output 0 and the capacitor held while every DAC is off. Pan
+// Docs gives the Color's figure only as a code comment ("use 0.998943 for
+// MGB&CGB"), from the old gbdev wiki with no measurement behind it; it puts
+// the corner near 706 Hz, kept until a capture settles it. The
 // DAC's fade when it turns off, the amplifier, headphone socket and speaker
 // are not modelled (README, Known gaps).
 

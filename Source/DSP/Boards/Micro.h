@@ -16,8 +16,13 @@
 // Issue 3 0.34, 0.66, 3.56, 3.70 V; Issue 2 0.39, 0.73, 3.66, 3.79 V. The
 // 128K's pin and its mixing with the AY are unsourced: it takes Issue 3's
 // levels, and by our convention the beeper's swing at MIC off (0.66 to
-// 3.70 V) equals one AY channel at full volume (README, Known gaps). No
-// speaker or socket stage is modelled, so Line renders as Pin.
+// 3.70 V) equals one AY channel at full volume (README, Known gaps): the
+// 128K service manual gives only the modulator's inputs, the ULA through
+// R112/C123 (68 kOhm, 1 uF) and the AY through R132/C127 (39 kOhm, 1 uF),
+// not the AY's level or how its pins are joined. Pin 28's slow fall after
+// EAR goes low (World of Spectrum) is put down to the EAR/MIC network (R36,
+// C32, R37, C35); no published model fits its timings, so the pin steps at
+// once. No speaker or socket stage is modelled, so Line renders as Pin.
 //
 // The beeper's notes run the ROM's BEEPER loop: the first OUT 209 - 12 (L
 // mod 4) T-states after the call (its setup and first, shortened pass), then

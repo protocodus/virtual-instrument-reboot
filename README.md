@@ -51,6 +51,18 @@ WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
 
+### 0.2.0 — 2026-11-17 — two cartridge boards on Line
+
+- On Line, the MMC5 cartridge's board: the APU and the MMC5 pass
+  15 kOhm and 100 nF into its inverting amplifier with 10 kOhm feedback, so
+  the whole console is high-passed at 106 Hz, two thirds as loud and
+  inverted (the NESdev Wiki's HVC-ETROM-02 drawing).
+- On Line, the 5B's amplifier as rainwarrior measured a Gimmick! cartridge:
+  its inputs high-passed at 12 Hz (the APU) and 20 Hz (its own channels), a
+  2.7:1 curve from 1 dB above one channel at volume 14, then 12 Hz. A 5B
+  channel at volume 15 now comes out 1.26 dB under its linear level, and a
+  loud 5B squeezes the APU with it.
+
 ### 0.1.0 — 2026-11-17 — first pass: four boards, five cartridge chips, sixteen presets
 
 - The handheld, console, PSG and micro boards with their revisions, the
@@ -136,8 +148,26 @@ state; the code is our own.
   (NESdev forum t=24288). **Bias** sets the DMC's held level, which moves
   the triangle and noise through that mixer.
 - **Line (reported):** the front-loader's first-order high-pass at 90 Hz
-  and low-pass at 14 kHz; the Famicom's high-pass at 37 Hz. The PAL
-  console takes the NTSC front-loader's, unsourced.
+  and low-pass at 14 kHz (the wiki's second-order low-pass sits "comfortably
+  above the audible range"); the Famicom's high-pass at 37 Hz. The PAL
+  console takes the NTSC front-loader's, unsourced. Before that stage, two
+  cartridges' own boards:
+  - **MMC5 (spec):** the wiki's HVC-ETROM-02 drawing sends the APU's audio
+    (cartridge pin 45), the MMC5's DAC and its pulses each through 15 kOhm
+    and 100 nF into the inverting input of the MMC5's amplifier, with
+    10 kOhm of feedback, out to pin 46. Everything the console plays is
+    high-passed at 106 Hz and scaled by -2/3, taking that input as a
+    virtual ground as the drawing's internal reference implies.
+  - **5B (reported, one cartridge):** rainwarrior's fit to his recordings
+    of Gimmick! (NESdev forum t=17745 and p=225726, September 2018): the
+    APU's input high-passed at 12 Hz and the 5B's channels at 20 Hz, mixed
+    in its amplifier, which is linear for one square "up to and including
+    volume 14" and above that follows "a threshold set 1dB above volume 14
+    ... with a compression ratio of 2.7:1 dB", then its output high-passed
+    at 12 Hz. He found the onset immediate and the stage "just a
+    nonlinearity", so the curve acts on the instantaneous level after the
+    input high-passes (our reading): a centred square at volume 14 meets
+    it 1 dB under the threshold, and the APU passes the same curve.
 - **Cartridge chips (spec, levels reported):** they sound only on the
   Famicom revision, whose cartridge slot returns audio (NESdev Wiki,
   "Expansion audio"). Expansion A is the VRC6 (two pulses with eight
@@ -170,7 +200,10 @@ state; the code is our own.
   plays the chip's own bass trick: periodic noise clocked by tone 3 at its
   rate, tone 3 silent.
 - **Line:** no line stage is known for any of the three, so Line renders as
-  Pin.
+  Pin. The Sega console is the Master System 1's: SMS Power reports its
+  "proper 2dB step gapping", while the Master System 2 "clips due to a
+  hardware design mistake" (an added pull-up, TmEE's scope photos, NESdev
+  forum t=15562) at a level no source gives.
 
 ### The micro (ZX Spectrum 128K, 48K)
 
@@ -196,6 +229,11 @@ state; the code is our own.
   which leaves the top octave flat by up to 9 cents on the 48K and 16 on
   the 128K. Revisions: the 128K, the 48K Issue 3 and the 48K Issue 2.
 - **Line:** no speaker or socket stage is modelled, so Line renders as Pin.
+  The 128K's service manual gives one part of its TV sound: the modulator
+  takes the ULA through 68 kOhm and 1 uF (R112, C123) and the AY through
+  39 kOhm and 1 uF (R132, C127); the AY's output level and how its three
+  pins are joined are not published, so the mix stays our convention
+  (Known gaps).
 
 ### The band-limited renderer
 
@@ -311,19 +349,33 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   and the micro; the micro's speaker. Their Line renders as Pin.
 - **The handheld.** The DAC's fade when it turns off ("varies between
   models", Pan Docs), the zombie writes other than $08 and the wave
-  channel's start-up delay are not modelled. The Color's capacitor factor puts its high-pass corner near
-  706 Hz, which thins everything it plays; we take Pan Docs' figure as
-  reported until a capture settles it.
+  channel's start-up delay are not modelled; the commonly used 6-cycle
+  delay traces only to a forum post pointing at copyleft code. The Color's
+  capacitor factor puts its high-pass corner near 706 Hz, which thins
+  everything it plays. Pan Docs gives 0.998943 only as a comment, "use
+  0.998943 for MGB&CGB", in code "applied at 4194304 Hz", and the figure
+  goes back to the old gbdev wiki with no measurement behind it (RavenCore
+  pull request 43). Ken Shirriff's die analysis confirms the direction:
+  the Color's amplifier "has an external feedback capacitor, which causes
+  it to act as a high-pass filter", but its capacitor values are not
+  published. We keep Pan Docs' figure, reported, until a capture of a
+  Color's output settles the corner.
 - **The console.** The APU mixer is the wiki's approximation; the PAL
   console's line stage is the NTSC front-loader's, assumed. The MMC5 is
   mixed linearly at the APU pulse's step (our reading of "equivalent in
   volume"); the 163's level is the middle of a reported range and its
   polarity unstated; the disk unit's page still has open questions. The
-  5B's level is one cartridge's measurement, and its amplifier, which "becomes
-  nonlinear at higher amplitudes, and includes some filtering" (NESdev
-  Wiki), is not modelled: no curve is published, only a high-pass fit in
-  a forum post (NESdev forum p=225726: 12 and 20 Hz) whose place against
-  the Famicom's own 37 Hz stage is not stated.
+  5B's level and its amplifier are one cartridge's measurements, and its
+  amplifier is the hard knee rainwarrior published: he wrote that it
+  needs "a soft knee curve" but gave none, and that the curve's control
+  sees "a different, weaker highpass" than the output, which his later
+  filter list (12, 20 and 12 Hz) does not separate; the 5B's polarity
+  against the APU is unstated. The MMC5 board's amplifier is taken as
+  inverting with a virtual-ground input; an older copy of the wiki's
+  drawing shows its inputs the other way round. The survey thread (NESdev
+  forum t=17741) also puts one VRC6 cartridge 1.1 dB under the APU's
+  square and the 163's cartridges from 11.6 to 19.2 dB over it, against
+  the wiki's figures used here.
 - **The PSG.** Two volume tables are published for Sega's consoles and they
   disagree; we use SMS Power's 2 dB steps. The Master System 2's output
   clipping is not modelled.
@@ -332,9 +384,12 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   beeper pin and its mix with the AY are unsourced: it takes the Issue 3's
   levels, and by our convention the beeper's swing equals one AY channel at
   full volume. Pin 28 falls slowly after EAR goes low (World of Spectrum:
-  180 to 2800 T-states to cross 0.70 V, by how long it was high); that is
-  reported only as read timings, not as a circuit, so the pin steps at
-  once. Some machines run every ULA timing one T-state later than the
+  180 to 2800 T-states to cross 0.70 V, by how long it was high), which
+  World of Spectrum puts down to the capacitors between pin 28 and the EAR
+  and MIC sockets (R36 680 Ohm, C32 100 nF, R37 1 kOhm and C35 10 nF on
+  the EAR side, from the 48K service manual's parts list). No published
+  model of that network fits the timings, so the pin steps at once.
+  Some machines run every ULA timing one T-state later than the
   references; ours are the references'.
 - **Ours, by design.** The playing layer, the handheld's wave counts past
   2048, the noise pitch rule (a key picks the noise's colour), the period
