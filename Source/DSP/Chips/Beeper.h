@@ -32,18 +32,6 @@ constexpr std::int64_t kClock128 = 3546900;
 constexpr std::int64_t kBeeperOverhead = 118;
 constexpr std::int64_t BeeperHalfPeriod(std::int64_t hl) noexcept { return 4 * hl + kBeeperOverhead; }
 
-// The BEEP command's loop value for a frequency: 437500 / f - 30.125
-// (3.5 MHz / 8, routine $03F8), rounded to the nearest integer as FIND_INT2
-// rounds. Valid for 6.7 Hz to 14.5 kHz, where HL fits 0 to 65535.
-inline std::int64_t BeeperLoopValue(double hz) noexcept {
-    const double hl = 437500.0 / hz - 30.125;
-    if (hl <= 0.0)
-        return 0;
-    if (hl >= 65535.0)
-        return 65535;
-    return static_cast<std::int64_t>(hl + 0.5);
-}
-
 class Beeper {
 public:
     // The BEEPER loop writes MIC off (bit 3 set) with every OUT, so a beeper

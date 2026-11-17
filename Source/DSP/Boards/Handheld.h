@@ -159,6 +159,12 @@ public:
             }
             Zombie(base + 2, sh, Clamp15(s.volume), sink);
         } else if (channel == 2) {
+            if (s.shape % kWaveCount != sh.shape) {
+                // A new wave needs the channel off (Start; Pan Docs), so it
+                // starts again, as a driver's would.
+                Start(channel, s);
+                return;
+            }
             if (s.period != sh.period) {
                 WaveCount(s.period, sink);
                 const int x = WaveRegister(s.period);

@@ -417,7 +417,9 @@ private:
             const int reg = 0x78 - 8 * k;
             const int length = N163Length();
             const int shape = s.shape % kWaveCount;
-            if (trigger && shape != sh.shape) {
+            // The chip reads its RAM as it plays, so a held note takes a new
+            // wave as it is written.
+            if (shape != sh.shape) {
                 for (int i = 0; i < length / 2; ++i) {
                     const int step = 32 / length;
                     const int a = kWaves[shape].samples[(2 * i) * step];
@@ -446,7 +448,9 @@ private:
         }
         case kFds: {
             const int shape = s.shape % kWaveCount;
-            if (trigger && shape != sh.shape) {
+            // The wave is writable while $4089 holds the output (NESdev), so
+            // a held note takes a new one too.
+            if (shape != sh.shape) {
                 fds_.Write(0x4089, 0x80, cart);
                 for (int i = 0; i < 64; ++i)
                     fds_.Write(static_cast<std::uint16_t>(0x4040 + i), kWaves64[shape][i], cart);

@@ -153,11 +153,10 @@ private:
                 if (p.enabled)
                     p.step = static_cast<std::uint8_t>((p.step - k) & 15);
             }
-        if (!saw_.live) {
-            // Silent means rate 0 or disabled: the accumulator stays 0.
+        // Silent means disabled, or rate 0 with the accumulator at 0, so
+        // the accumulator stays where it is.
+        if (!saw_.live)
             saw_.clocks = static_cast<std::uint8_t>((saw_.clocks + saw_.timer.CatchUp(now_)) % 14);
-            saw_.accumulator = 0;
-        }
     }
 
     bool Update() noexcept {
@@ -171,11 +170,11 @@ private:
             codes[i] = p.enabled && (p.mode || p.step <= p.duty) ? p.volume : 0;
         }
         {
-            const bool live = !halt_ && saw_.enabled && saw_.rate > 0;
-            if (live && !saw_.live) {
+            // A rate of 0 leaves the accumulator where it was until the
+            // cycle's reset, so the saw is followed until it is back at 0.
+            const bool live = !halt_ && saw_.enabled && (saw_.rate > 0 || saw_.accumulator != 0);
+            if (live && !saw_.live)
                 saw_.clocks = static_cast<std::uint8_t>((saw_.clocks + saw_.timer.CatchUp(now_)) % 14);
-                saw_.accumulator = 0;
-            }
             saw_.live = live;
             codes[kSaw] = saw_.enabled ? saw_.accumulator >> 3 : 0;
         }

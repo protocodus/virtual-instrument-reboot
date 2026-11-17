@@ -24,6 +24,11 @@ public:
             b0_ = 1.0, b1_ = 0.0, a1_ = 0.0;
             return;
         }
+        // A corner at or past Nyquist (the console's 14 kHz at a 22 kHz
+        // rate) would turn the prewarp's tangent negative: such a corner is
+        // taken just under Nyquist.
+        if (cornerHz > 0.45 * sampleRate)
+            cornerHz = 0.45 * sampleRate;
         const double k = std::tan(3.141592653589793 * cornerHz / sampleRate);
         a1_ = (k - 1.0) / (k + 1.0);
         if (kind == Kind::HighPass) {

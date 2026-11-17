@@ -86,15 +86,25 @@ public:
     // AY tone: TP of CPU / (32 TP). AY noise: NP whose shift rate, CPU /
     // (32 NP), is nearest `hz` times 32 (ours). Buzzer: the envelope period
     // EP, a saw (shapes 0, 1) at CPU / (512 EP), a triangle (2, 3) at half
-    // that. Beeper: the BEEP command's loop value HL.
+    // that. Beeper: the BEEPER loop's HL.
     [[nodiscard]] bool PeriodFor(int channel, Voice voice, double hz, int shape, std::int64_t& period) const noexcept {
         if (hz <= 0.0)
             return false;
         const double cpu = static_cast<double>(clock_);
         if (channel == kBeeper) {
-            const double hl = 437500.0 / hz - 30.125;
-            period = zx::BeeperLoopValue(hz);
-            return hl >= 0.0 && hl <= 65535.0;
+            // Ours: the HL nearest in pitch on this machine's clock. The
+            // BEEP command's own 437500 / f - 30.125 (routine $03F8)
+            // assumes 3.5 MHz and 120.5 T-states a half cycle, which plays
+            // a little sharp on the 48K and 23 cents sharp on the 128K.
+            const double overhead = static_cast<double>(zx::kBeeperOverhead);
+            const double hl = (cpu / (2.0 * hz) - overhead) / 4.0;
+            if (!(hl >= 0.0 && hl <= 65535.0))
+                return false;
+            const auto low = static_cast<std::int64_t>(hl);
+            const double target = 4.0 * hl + overhead;
+            const double below = 4.0 * static_cast<double>(low) + overhead;
+            period = low < 65535 && target * target >= below * (below + 4.0) ? low + 1 : low;
+            return true;
         }
         if (!HasAy())
             return false;
