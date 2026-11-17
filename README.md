@@ -34,7 +34,7 @@ one-bit beeper.
 | --- | --- | --- | --- | --- |
 | 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -11.4 dBFS |
 | 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -19.1 dBFS |
-| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -10.1 dBFS |
+| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -5.4 dBFS |
 | 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -15.5 dBFS |
 | 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -4.8 dBFS |
 | 10 | Periodic Bass | [10-periodic-bass.wav](Docs/audio/10-periodic-bass.wav) | 8.3 s | -19.1 dBFS |
@@ -50,6 +50,25 @@ Tools/update_readme_blocks.py demos --readme README.md --manifest
 WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
+
+### 0.3.0 — 2026-11-17 — a machine for each layer
+
+- Layers A and B each play machines of their own: each has its own Board,
+  Revision, Expansion, Expansion channels, Bias, Path and Boards, so a
+  console's triangle can play under a handheld's pulses. The seven controls
+  that were the device's are now layer A's, under the same ids, and layer B
+  gets seven new ones (`b_board` to `b_boards`). A patch saved before 0.3.0
+  with B on plays B on Init's handheld until B's board is set; the factory
+  presets set it.
+- Each layer moves on its own machines' frame, and its arpeggio steps there.
+  Double gives each layer its own second set. A change of a layer's machine
+  settings, or of its On, resets only that layer's machines; a layer that is
+  off runs none.
+- Pulse Glide and Plain Organ set B's board to A's. Two layers on one board
+  now sum after two machines' mixers rather than inside one, so Pulse
+  Glide's two pulses no longer share the console's nonlinear pulse DAC: it
+  is 0.3 dB louder, with peaks 4.7 dB higher, and is re-rendered. Plain
+  Organ keeps its six notes as two PSGs a layer, where it had four shared.
 
 ### 0.2.3 — 2026-11-17 — the 128K's TV sound
 
@@ -311,8 +330,8 @@ register are jumped ahead exactly when it can be (`Chips/Lfsr.h`).
   stage delays by whole host samples, so the latency is 16 samples at 1x,
   then 24, 28 and 30 at 2x, 4x and 8x, plus the output stage's 96 at 48
   kHz.
-- **Double** runs a second set of machines that takes every register write
-  of the first, with its note half the Detune up while the first plays half
+- **Double** gives each layer a second set of machines that takes every
+  register write of its first, with its note half the Detune up while the first plays half
   of it down. The first set plays on the left and the second on the right,
   each folded to mono at the level one side of a single set has: two
   machines side by side, as chip musicians play two handhelds live. Here
@@ -321,10 +340,11 @@ register are jumped ahead exactly when it can be (`Chips/Lfsr.h`).
   takes a note out of a channel's reach, the second set plays the first
   set's period. A change of Double resets the machines.
 - **CPU** on the development container (Release, GCC 13.3), six held keys
-  on each preset at 48 kHz: 0.16 % of a core on average and 0.9 % at worst
-  (Disk Organ's four consoles) at 1x; 1.1 % and 2.4 % at 8x; with Double,
-  0.28 % and 1.8 % at 1x, 1.5 % and 3.9 % at 8x. These are not Reason's
-  figures.
+  on each preset at 48 kHz, measured on 0.2.3: 0.16 % of a core on average
+  and 0.9 % at worst (Disk Organ's four consoles) at 1x; 1.1 % and 2.4 % at
+  8x; with Double, 0.28 % and 1.8 % at 1x, 1.5 % and 3.9 % at 8x. Since
+  0.3.0 a layer B that is on runs machines of its own, which add their own
+  cost. These are not Reason's figures.
 
 ### The playing layer (ours)
 
@@ -340,7 +360,7 @@ and it only writes values the chips accept.
   109 Hz.
 - **Frames.** Everything that moves while a note sounds (the envelope's
   volume steps, vibrato, glide, the pitch wheel, the host's master tuning,
-  the arpeggio) is written at the machine's frame, as a game's driver ran on its video frame: 59.73 Hz
+  the arpeggio) is written at its layer's machines' frame, as a game's driver ran on its video frame: 59.73 Hz
   on the handheld, 60.10 or 50.01 Hz on the console, 59.92 Hz on the PSG,
   50.02 or 50.08 Hz on the micro. A note's own start and end land on its
   sample.
@@ -351,11 +371,12 @@ and it only writes values the chips accept.
   the PSG's, the AY's and the 5B's logarithmic ones it is a fixed number of
   decibels, so the same envelope falls faster in level there, as a driver's
   did. The micro's Buzz part plays the AY's own envelope.
-- **Voices.** Up to eight machines of one board play at once (**Boards**);
-  a note takes the free channel of its layer's part, on any of them, that
-  was freed longest ago, else the oldest released note's, else the oldest
-  note's. Two layers, A and B, each choose a
-  part, shape, level, envelope, transpose and fine tune. **Mode** is Poly,
+- **Voices.** Two layers, A and B, each play machines of their own: up to
+  eight of one board (**Boards**), with its own revision, expansion, bias
+  and path. A note takes the free channel of its layer's part, on any of
+  that layer's machines, that was freed longest ago, else the oldest
+  released note's, else the oldest note's. Each layer chooses a part,
+  shape, level, envelope, transpose and fine tune. **Mode** is Poly,
   Mono (legato, with glide) or Arp (one voice stepping through the held
   keys every Arp rate frames).
 - **Waves** for the wave channels are our own harmonic waves
@@ -368,14 +389,14 @@ and it only writes values the chips accept.
 
 | Control | Range | What it does |
 | --- | --- | --- |
-| Board | Handheld, Console, PSG, Micro | the machine |
-| Revision | per board (above) | the machine's model |
-| Expansion | none, A to E | the Famicom's cartridge chip |
-| Expansion channels | 1 to 8 | how many channels expansion C runs |
-| Bias | 0 to 127 | the console's held DMC level |
-| Path | Pin, Line | the chips' DACs and mixer, or the machine's output stage |
-| Boards | 1 to 8 | machines played at once |
-| Double, Detune | Off, On; 0 to 50 cents | a second set of machines on the right, its notes Detune above the first set's on the left |
+| A and B: Board | Handheld, Console, PSG, Micro | the layer's machine |
+| A and B: Revision | per board (above) | the machine's model |
+| A and B: Expansion | none, A to E | the Famicom's cartridge chip |
+| A and B: Expansion channels | 1 to 8 | how many channels expansion C runs |
+| A and B: Bias | 0 to 127 | the console's held DMC level |
+| A and B: Path | Pin, Line | the chips' DACs and mixer, or the machine's output stage |
+| A and B: Boards | 1 to 8 | the layer's machines played at once |
+| Double, Detune | Off, On; 0 to 50 cents | a second set of each layer's machines on the right, its notes Detune above the first set's on the left |
 | Mode | Poly, Mono, Arp | how keys take voices |
 | Arp rate | 1 to 8 frames | frames an arpeggio step holds |
 | Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz, 0 to 1000 ms | written at the frame; the mod wheel adds up to 50 cents |
@@ -397,9 +418,11 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   amplifier, headphone socket and speaker; any line stage of the PSG boards
   and the 48K; the micro's speaker. Their Line renders as Pin. What is
   published of them gives topologies, not a model: the original handheld's
-  and the Game Gear's headphone sockets couple through 100 uF, whose corner
-  is the load's (about 50 Hz into 32 Ohm headphones, under 1 Hz into a line
-  input); the
+  headphone socket couples through 100 uF, whose corner is the load's
+  (about 50 Hz into 32 Ohm headphones, under 1 Hz into a line input), and
+  the Game Gear's through 47 uF and 100 Ohm a side, by a continuity trace
+  of an original published with a clone's parts list (reported; about
+  26 Hz into 32 Ohm, under 1 Hz into a line input); the
   Master System 1 buffers the VDP's sound pin with one transistor and a
   series capacitor whose values are not legible in the scanned manuals;
   the amplifiers' gains and clipping points are not published.
@@ -463,7 +486,9 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   180 to 2800 T-states to cross 0.70 V, by how long it was high), which
   World of Spectrum puts down to the capacitors between pin 28 and the EAR
   and MIC sockets (R36 680 Ohm, C32 100 nF, R37 1 kOhm and C35 10 nF on
-  the EAR side, from the 48K service manual's parts list). No published
+  the EAR side, from the 48K service manual's parts list; the Issue 1 and
+  2 parts list as another report reads it gives R36 1 kOhm and R37
+  680 Ohm, which is not checked yet). No published
   model of that network fits the timings, so the pin steps at once.
   On the 128K's Line the AY's tied pins are averaged (estimate); real
   NMOS outputs tied together interact and would not sum linearly, and the

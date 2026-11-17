@@ -408,7 +408,7 @@ void TestVoices() {
     {
         const auto e = Fresh(Plain(0));
         Play(*e, { On(0, 30) }, 2000);
-        Check(e->Sounding() == 1 && e->MachineAt(0).HandheldBoard().Chip().DacOn(2), "the low key does not go to the wave channel");
+        Check(e->Sounding() == 1 && e->MachineAt(0, 0).HandheldBoard().Chip().DacOn(2), "the low key does not go to the wave channel");
     }
     // The PSG's bass takes tone 3 as well, so with one machine a bass and
     // two tones fill it and a third tone steals.
@@ -418,7 +418,7 @@ void TestVoices() {
         const auto e = Fresh(c);
         Play(*e, { On(0, 30), On(10, 72), On(20, 76) }, 2000);
         Check(e->Sounding() == 3, "psg: bass and two tones are not three notes");
-        const psg::Chip& chip = e->MachineAt(0).PsgBoard().Chip();
+        const psg::Chip& chip = e->MachineAt(0, 0).PsgBoard().Chip();
         Check(chip.Attenuation(2) == 15 && chip.Attenuation(3) < 15, "psg: the bass does not hold tone 3 silent");
         Play(*e, { On(0, 79) }, 2000);
         Check(e->Sounding() == 3, "psg: a fourth note does not steal");
@@ -427,11 +427,39 @@ void TestVoices() {
     {
         Controls c = Plain(1);
         c[kBOn] = 1;
+        c[kBBoard] = 1;
         c[kBPart] = 1;
         c[kBTranspose] = 12;
         const auto e = Fresh(c);
         Play(*e, { On(0, 60), On(0, 64) }, 2000);
         Check(e->Sounding() == 4, "two layers do not double the notes");
+    }
+    // Each layer plays its own machines: a handheld under a PSG, each note
+    // on both, and B's machine count its own.
+    {
+        Controls c = Plain(0);
+        c[kBOn] = 1;
+        c[kBBoard] = 2;
+        c[kBBoards] = 1;
+        const auto e = Fresh(c);
+        Play(*e, { On(0, 60), On(0, 64), On(0, 67), On(0, 71) }, 2000);
+        Check(e->MachineAt(0, 0).Kind() == BoardKind::Handheld && e->MachineAt(1, 0).Kind() == BoardKind::Psg,
+              "the layers do not play their own boards");
+        Check(e->Boards(0) == 2 && e->Boards(1) == 1, "the layers do not keep their own machine counts");
+        // Two handhelds' four pulses hold the four keys; one PSG's three tones
+        // hold three.
+        Check(e->Sounding() == 7, "two layers on their own machines: " + std::to_string(e->Sounding()) + " notes, not 7");
+    }
+    // A layer that is off runs no machines: its settings change nothing.
+    {
+        Controls c = Plain(1);
+        const std::vector<Event> ev { On(0, 60), On(4800, 67), Off(24000, 60) };
+        const Audio a = Play(*Fresh(c), ev, 48000);
+        c[kBBoard] = 3;
+        c[kBBoards] = 8;
+        c[kBPath] = 0;
+        const Audio b = Play(*Fresh(c), ev, 48000);
+        Check(a.left == b.left && a.right == b.right, "layer B's machines are heard while it is off");
     }
 }
 

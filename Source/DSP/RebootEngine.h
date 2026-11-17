@@ -1,27 +1,29 @@
 #pragma once
 
-// Reboot's engine: up to eight machines of one board, the playing layer that
-// writes their registers (ours, README How it works) and the portfolio's
-// output stage.
+// Reboot's engine: two layers, each playing its own machines (up to eight of
+// one board), the playing layer that writes their registers (ours, README
+// How it works) and the portfolio's output stage.
 //
 // The playing layer is a sound driver of our own. A note's writes land on
 // the cycle its MIDI event maps to; everything that moves while a note
 // sounds (the envelope's volume steps, vibrato, glide, the pitch wheel, the
 // arpeggio) is written at the machine's frame, as a game's driver ran on
-// its video frame. Pitch is always a period register, so the chip's own
-// quantisation, out-of-tune top notes and stepped vibrato are what is heard.
+// its video frame. Each layer moves on its own machines' frame. Pitch is
+// always a period register, so the chip's own quantisation, out-of-tune top
+// notes and stepped vibrato are what is heard.
 //
 // Oversampling renders the machines at 2, 4 or 8 times the host rate and
-// decimates them back (Render/Decimator.h); Double runs a second set of
-// machines that mirrors every register write of the first, detuned, the
-// first set on the left and the second on the right (ours, README How it
-// works).
+// decimates them back (Render/Decimator.h); Double gives each layer a second
+// set of machines that mirrors every register write of the first, detuned,
+// the first sets on the left and the second on the right (ours, README How
+// it works).
 //
 // Real time: Process, Midi, the note calls and SetControls neither allocate
-// nor lock. Prepare is setup. A change of board, revision, expansion,
-// expansion channels, machine count or Double resets the machines and plays
-// the held keys again on them; a change of mode, a layer's On or its Part
-// plays the held keys again on the machines as they are.
+// nor lock. Prepare is setup. A change of a layer's board, revision,
+// expansion, expansion channels, machine count or On resets that layer's
+// machines, and a change of Double resets both; then the held keys play
+// again. A change of mode or a layer's Part plays the held keys again on the
+// machines as they are. A layer that is off runs no machines.
 
 #include "Driver/Machine.h"
 #include "OutputStage.h"
@@ -36,7 +38,8 @@ namespace protocodus::reboot {
 class Engine {
 public:
     static constexpr int kMaxBoards = 8;
-    static constexpr int kSlots = kMaxBoards * Machine::kMaxChannels;
+    static constexpr int kGroupSlots = kMaxBoards * Machine::kMaxChannels;   // a layer's channels
+    static constexpr int kSlots = kLayers * kGroupSlots;
     // Ours: one channel at full volume, a 50 % square, reads -24 dBFS RMS
     // on every board before Volume, so a four-channel chord at the
     // factory levels sits near -9 VU on Reason's meter.
@@ -85,8 +88,10 @@ public:
     }
     // The factor the machines run at, after kMaxInternalRate.
     [[nodiscard]] int Oversampling() const noexcept { return oversampling_; }
-    [[nodiscard]] int Boards() const noexcept { return boards_; }
-    [[nodiscard]] const Machine& MachineAt(int board) const noexcept { return machines_[board]; }
+    [[nodiscard]] int Boards(int layer) const noexcept { return groups_[layer].boards; }
+    [[nodiscard]] const Machine& MachineAt(int layer, int board) const noexcept {
+        return groups_[layer].machines[board];
+    }
     // Notes holding a channel, released ones included.
     [[nodiscard]] int Sounding() const noexcept;
 
@@ -127,12 +132,33 @@ private:
         bool down = false;       // false: held only by the pedal
     };
 
-    static int Channel(int slot) noexcept { return slot % Machine::kMaxChannels; }
-    Machine& MachineOf(int slot) noexcept { return machines_[slot / Machine::kMaxChannels]; }
-    Machine& TwinOf(int slot) noexcept { return twins_[slot / Machine::kMaxChannels]; }
+    // A layer's machines, the Double set's, and the frame they keep.
+    struct Group {
+        Machine machines[kMaxBoards];
+        Machine twins[kMaxBoards];
+        MachineSettings settings;
+        int boards = 2;
+        Path path = Path::Line;
+        double swing = 1.0;      // the output scale that brings the board to kReferenceRms
+        double frameHz = 60.0, vibratoStep = 0.0;
+        int vibratoDelay = 0, glideFrames = 0;
+        int arpIndex = 0, arpCount = 0;
+        std::int64_t tickNum = 0, periodNum = 1, periodDen = 1;
+    };
 
-    void Apply(bool reset, bool revoice);
-    void Revoice(bool reset);
+    // Slot s is layer s / kGroupSlots's, on its machine (s % kGroupSlots) /
+    // kMaxChannels, channel s % kMaxChannels.
+    static int Channel(int slot) noexcept { return slot % Machine::kMaxChannels; }
+    static int LayerOf(int slot) noexcept { return slot / kGroupSlots; }
+    static int BoardOf(int slot) noexcept { return slot % kGroupSlots / Machine::kMaxChannels; }
+    Machine& MachineOf(int slot) noexcept { return groups_[LayerOf(slot)].machines[BoardOf(slot)]; }
+    const Machine& MachineOf(int slot) const noexcept { return groups_[LayerOf(slot)].machines[BoardOf(slot)]; }
+    Machine& TwinOf(int slot) noexcept { return groups_[LayerOf(slot)].twins[BoardOf(slot)]; }
+
+    // `resets` holds a bit for each layer whose machines start again.
+    static constexpr int kAllLayers = (1 << kLayers) - 1;
+    void Apply(int resets, bool revoice);
+    void Revoice(int resets);
     void Strike(int key, int velocity);
     void Lift(int key);
     int StartNote(int layer, int key, int velocity, double glide);
@@ -148,40 +174,33 @@ private:
     bool Compose(int slot, ChannelSettings& s, double cents = 0.0) const;
     void Send(int slot, const ChannelSettings& s, bool start);
     void Write(int slot);
-    void Tick();
+    void Tick(int layer);
     [[nodiscard]] int ArpKey(int index) const noexcept;
     [[nodiscard]] int HeldIndex(int key) const noexcept;
 
-    Machine machines_[kMaxBoards];
-    Machine twins_[kMaxBoards];          // the Double set
+    Group groups_[kLayers];
     Slot slots_[kSlots];
     Key held_[128];
     int heldCount_ = 0;
     int mono_[kLayers] = { -1, -1 };    // Mono and Arp: each layer's note
-    int arpIndex_ = 0, arpCount_ = 0;
 
     Controls controls_;
-    MachineSettings settings_;
     Layer layers_[kLayers];
     int rate_ = 48000;
     int oversampling_ = 1;
     bool double_ = false;
     double detune_ = 0.0;
-    int boards_ = 2;
-    Path path_ = Path::Line;
     int mode_ = 0, arpRate_ = 2, bendRange_ = 2;
-    int vibratoDelay_ = 0, glideFrames_ = 0;
-    double vibratoDepth_ = 0.0, vibratoStep_ = 0.0, velocity_ = 0.5, gain_ = 0.0;
-    double frameHz_ = 60.0;
+    double vibratoDepth_ = 0.0, velocity_ = 0.5, gain_ = 0.0;
     double bend_ = 0.0, wheel_ = 0.0, tune_ = 0.0;
     bool sustain_ = false;
     std::uint64_t age_ = 0;
 
-    std::int64_t tickNum_ = 0, periodNum_ = 1, periodDen_ = 1;
-
     Decimator decimators_[2];
-    // The machines' left and right at their own rate, then the Double set's.
-    float bus_[4][StepBuffer::kMaxFrames] {};
+    // The layers' sum, left and right, at the machines' rate.
+    float bus_[2][StepBuffer::kMaxFrames] {};
+    // One layer's machines' left and right, then its Double set's.
+    float layerBus_[4][StepBuffer::kMaxFrames] {};
     OutputStage<2> stage_;
 };
 

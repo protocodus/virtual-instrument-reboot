@@ -115,40 +115,49 @@ public:
         };
         const int control = static_cast<int>(index);
         const bool layered = control >= kAOn && control <= kBMod;
-        const int layer = layered && control >= kBOn ? 1 : 0;
-        const int base = kLayerBase[layer];
+        const bool machined = control <= kBoards || control >= kBBoard;
+        const int layer = (layered && control >= kBOn) || control >= kBBoard ? 1 : 0;
+        const int base = kLayerBase[layer], m = kMachineBase[layer];
+        // Layer B is heard alone: on its own machines at A's pitch, it would
+        // sum with A by the phases the playing left between them.
         if (layer == 1 && control != kBOn)
-            with({ { kBOn, 1 } });
+            with({ { kBOn, 1 }, { kAOn, 0 } });
+        if (machined) {
+            switch (control - m) {
+            case kMExpansion:
+                // A cartridge chip sounds only on the Famicom's slot, through
+                // its own part.
+                with({ { m + kMBoard, 1 }, { m + kMRevision, 1 }, { base + kPart, 3 } });
+                break;
+            case kMExpansionChannels:
+                with({ { m + kMBoard, 1 }, { m + kMRevision, 1 }, { m + kMExpansion, 3 }, { base + kPart, 3 } });
+                break;
+            case kMBias:
+                // The DMC's level moves the triangle through the mixer.
+                with({ { m + kMBoard, 1 }, { base + kPart, 1 } });
+                break;
+            case kMPath:
+                // The handheld original's 28 Hz corner is all but the Pin
+                // blocker's on a chord from G3 up; the console's line stage
+                // is not.
+                with({ { m + kMBoard, 1 } });
+                break;
+            case kMBoards:
+                // One wave channel a machine, so every count changes how
+                // many of a three-note chord sound.
+                with({ { base + kPart, 1 } });
+                break;
+            default:
+                break;
+            }
+        }
         switch (control) {
-        case kRevision:
-            break;
         case kBOn:
-            // B doubles A on the same two pulses at the same pitch, and a
-            // trigger leaves a pulse's duty step where it was (Pan Docs), so
-            // the doubled level rests on the phases the playing left.
-            rule.history = "the two layers' pulses keep the duty steps the long play left";
-            break;
-        case kExpansion:
-            // A cartridge chip sounds only on the Famicom's slot, through its
-            // own part.
-            with({ { kBoard, 1 }, { kRevision, 1 }, { kAPart, 3 } });
-            break;
-        case kExpansionChannels:
-            with({ { kBoard, 1 }, { kRevision, 1 }, { kExpansion, 3 }, { kAPart, 3 } });
-            break;
-        case kBias:
-            // The DMC's level moves the triangle through the mixer.
-            with({ { kBoard, 1 }, { kAPart, 1 } });
-            break;
-        case kPath:
-            // The handheld original's 28 Hz corner is all but the Pin
-            // blocker's on a chord from G3 up; the console's line stage is not.
-            with({ { kBoard, 1 } });
-            break;
-        case kBoards:
-            // One wave channel a machine, so every count changes how many of
-            // a three-note chord sound.
-            with({ { kAPart, 1 } });
+            // B doubles A at the same pitch on machines of its own, which
+            // start when B comes on, and a trigger leaves a pulse's duty step
+            // where it was (Pan Docs), so the doubled level rests on the
+            // phases between the two sets of machines.
+            rule.history = "the two layers' machines keep the duty phases they started with";
             break;
         case kArpRate:
             with({ { kMode, 2 } });
@@ -197,7 +206,7 @@ public:
                 rule.reason = "the decay falls from each note's peak, which held notes have passed";
                 break;
             case kMod:
-                with({ { kBoard, 1 }, { kRevision, 1 }, { kExpansion, 4 }, { base + kPart, 3 } });
+                with({ { m + kMBoard, 1 }, { m + kMRevision, 1 }, { m + kMExpansion, 4 }, { base + kPart, 3 } });
                 break;
             case kShape:
                 // The pulse has four duties, so 6 plays as the base's 2; the

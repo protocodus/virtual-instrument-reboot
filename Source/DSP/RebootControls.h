@@ -17,6 +17,7 @@
 namespace protocodus::reboot {
 
 enum Control : int {
+    // Layer A's machines; layer B's are the same seven at kBBoard.
     kBoard,             // 0 Handheld, 1 Console, 2 PSG, 3 Micro
     kRevision,          // the board's revision (README, How it works); past the board's last, its last
     kExpansion,         // the Console's cartridge chip: 0 none, then A to E
@@ -37,7 +38,13 @@ enum Control : int {
     kBOn, kBPart, kBShape, kBLevel, kBAttack, kBDecay, kBSustain, kBRelease, kBTranspose, kBFine, kBMod,
     kDouble,            // 0 one set of machines; 1 a second set too, the first left and the second right
     kDetune,            // cents between the two sets with Double, half of it either way
+    kBBoard, kBRevision, kBExpansion, kBExpansionChannels, kBBias, kBPath, kBBoards,
     kControlCount
+};
+
+// A layer's machines, as offsets from kBoard or kBBoard.
+enum MachineControl : int {
+    kMBoard, kMRevision, kMExpansion, kMExpansionChannels, kMBias, kMPath, kMBoards, kMachineControls
 };
 
 // A layer's controls, as offsets from kAOn or kBOn.
@@ -57,6 +64,7 @@ enum LayerControl : int {
 };
 constexpr int kLayers = 2;
 constexpr int kLayerBase[kLayers] = { kAOn, kBOn };
+constexpr int kMachineBase[kLayers] = { kBoard, kBBoard };
 
 enum class Curve { kLinear, kLog, kInteger, kStepped };
 
@@ -70,13 +78,13 @@ struct ControlInfo {
 };
 
 inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
-    { "board", "Board", 0.0, 3.0, 0.0, 4, Curve::kStepped, "" },
-    { "revision", "Revision", 0.0, 2.0, 0.0, 3, Curve::kStepped, "" },
-    { "expansion", "Expansion", 0.0, 5.0, 0.0, 6, Curve::kStepped, "" },
-    { "expansion_channels", "Expansion channels", 1.0, 8.0, 4.0, 8, Curve::kStepped, "" },
-    { "bias", "Bias", 0.0, 127.0, 0.0, 0, Curve::kInteger, "" },
-    { "path", "Path", 0.0, 1.0, 1.0, 2, Curve::kStepped, "" },
-    { "boards", "Boards", 1.0, 8.0, 2.0, 8, Curve::kStepped, "" },
+    { "board", "A Board", 0.0, 3.0, 0.0, 4, Curve::kStepped, "" },
+    { "revision", "A Revision", 0.0, 2.0, 0.0, 3, Curve::kStepped, "" },
+    { "expansion", "A Expansion", 0.0, 5.0, 0.0, 6, Curve::kStepped, "" },
+    { "expansion_channels", "A Expansion channels", 1.0, 8.0, 4.0, 8, Curve::kStepped, "" },
+    { "bias", "A Bias", 0.0, 127.0, 0.0, 0, Curve::kInteger, "" },
+    { "path", "A Path", 0.0, 1.0, 1.0, 2, Curve::kStepped, "" },
+    { "boards", "A Boards", 1.0, 8.0, 2.0, 8, Curve::kStepped, "" },
     { "mode", "Mode", 0.0, 2.0, 0.0, 3, Curve::kStepped, "" },
     { "arp_rate", "Arp rate", 1.0, 8.0, 2.0, 0, Curve::kInteger, "frames" },
     { "vibrato_depth", "Vibrato", 0.0, 100.0, 0.0, 0, Curve::kLinear, "cents" },
@@ -110,6 +118,13 @@ inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "b_mod", "B Mod", 0.0, 63.0, 0.0, 0, Curve::kInteger, "" },
     { "double", "Double", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
     { "detune", "Detune", 0.0, 50.0, 8.0, 0, Curve::kLinear, "cents" },
+    { "b_board", "B Board", 0.0, 3.0, 0.0, 4, Curve::kStepped, "" },
+    { "b_revision", "B Revision", 0.0, 2.0, 0.0, 3, Curve::kStepped, "" },
+    { "b_expansion", "B Expansion", 0.0, 5.0, 0.0, 6, Curve::kStepped, "" },
+    { "b_expansion_channels", "B Expansion channels", 1.0, 8.0, 4.0, 8, Curve::kStepped, "" },
+    { "b_bias", "B Bias", 0.0, 127.0, 0.0, 0, Curve::kInteger, "" },
+    { "b_path", "B Path", 0.0, 1.0, 1.0, 2, Curve::kStepped, "" },
+    { "b_boards", "B Boards", 1.0, 8.0, 2.0, 8, Curve::kStepped, "" },
 } };
 
 // The value of control `index` at normalised position n (clamped to 0..1).
