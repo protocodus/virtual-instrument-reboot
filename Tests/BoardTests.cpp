@@ -418,17 +418,27 @@ void TestLevels(Machine& m) {
     }
     const double cap = level(handheld, 0, Voice::Pulse, 440.0, 2, 15, Path::Line) / level(handheld, 0, Voice::Pulse, 440.0, 2);
     Check(cap > 0.97 && cap < 1.01, "handheld capacitor at 440 Hz " + std::to_string(cap));
-    // The Color's capacitor is the original's: kathoc's recording put a
-    // Pocket, on the Color's amplifier chip, 2.8 dB under the original at
-    // 71 Hz, where Pan Docs' 0.998943 (706 Hz) would take 20 dB off.
+    // The original's capacitor (Pan Docs' 28 Hz) keeps most of a 71 Hz square.
+    // The Color's Line is two high-passes, 176 and 47 Hz, fitted to Herbert
+    // Weixelbaum's recording of a 65.41 Hz square: such a square keeps the
+    // share of its level the two poles leave its odd harmonics.
     {
         const MachineSettings color { BoardKind::Handheld, 1, 0, 4, 0 };
-        const auto line = [&](const MachineSettings& s) {
-            return level(s, 0, Voice::Pulse, 71.0, 2, 15, Path::Line) / level(s, 0, Voice::Pulse, 71.0, 2);
+        const auto line = [&](const MachineSettings& s, double hz) {
+            return level(s, 0, Voice::Pulse, hz, 2, 15, Path::Line) / level(s, 0, Voice::Pulse, hz, 2);
         };
-        const double original = line(handheld), later = line(color);
-        Check(std::fabs(Db(later / original)) < 0.1, "the color's capacitor at 71 Hz " + std::to_string(Db(later / original)) + " dB");
+        const double original = line(handheld, 71.0);
         Check(original > 0.9, "handheld capacitor at 71 Hz " + std::to_string(original));
+        const double hz = 65.41;
+        double kept = 0.0, whole = 0.0;
+        for (int n = 1; n * hz < 20000.0; n += 2) {
+            const double f2 = n * hz * n * hz;
+            kept += f2 / (f2 + 176.0 * 176.0) * f2 / (f2 + 47.0 * 47.0) / (n * n);
+            whole += 1.0 / (n * n);
+        }
+        const double later = line(color, hz), expected = std::sqrt(kept / whole);
+        Check(std::fabs(Db(later / expected)) < 0.2,
+              "the color's line at 65 Hz " + std::to_string(Db(later)) + " dB against " + std::to_string(Db(expected)));
     }
     for (const MachineSettings& s : { MachineSettings { BoardKind::Psg, 0, 0, 4, 0 }, micro }) {
         m.Prepare(kRate);

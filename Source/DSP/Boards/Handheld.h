@@ -5,7 +5,7 @@
 // the coupling capacitor after them.
 //
 // Revisions: Original (DMG) and Color (CGB), which differ in the APU's
-// quirks.
+// quirks and in their output stage.
 //
 // DACs (Pan Docs, Audio details, read 2026-11-17; spec): a DAC is on when
 // NRx2 & $F8 is not 0 (NR30 bit 7 for the wave channel); on, it maps digital
@@ -13,23 +13,28 @@
 // an enabled DAC will dutifully convert into analog 1"); off, it gives 0.
 // The mixer adds the channels NR51 sends to each side and scales each side
 // by NR50's volume + 1 over 8. Pin is that sum. Line adds the capacitor:
-// Pan Docs' out = in - capacitor, capacitor = in - out * factor, factor
-// 0.999958 per clock (reported), a corner near 28 Hz, with the output 0 and
-// the capacitor held while every DAC is off.
+// Pan Docs' out = in - capacitor, capacitor = in - out * factor, with the
+// output 0 and the capacitor held while every DAC is off.
 //
-// The Color takes the same factor (reported: a measurement of its sibling).
-// Pan Docs' "use 0.998943 for MGB&CGB" (blargg's Game Boy Sound Operation),
-// a corner near 706 Hz, is contradicted by a recording: kathoc (note.com,
-// brickboy Development Story #10, 2026-08-29) recorded a Pocket and an
-// original at their headphone sockets at 96 kHz, and at 71 Hz the Pocket was
-// 2.8 dB under the original, where 0.998943 predicts 20 dB. Fitted to that
-// recording, 706 Hz misses by 11.25 dB, the original's 28 Hz by 5.28 dB and
-// the best, 5 Hz, by 5.24 dB, so it rejects 706 Hz but cannot tell 28 Hz
-// from a lower corner. The Pocket's amplifier is the Color's chip: Gekkio's
-// MGB-ECPU-01 drawing names U3 AMP-MGB, and Ken Shirriff's die photo of the
-// Color's IR3R53N is marked AMP MGB. No recording of a Color itself was
-// found. The DAC's fade when it turns off, the amplifier, headphone socket
-// and speaker are not modelled (README, Known gaps).
+// Line's corners (reported) are fitted to Herbert Weixelbaum's recordings
+// (herbertweixelbaum.com/comparison.htm, "game boy sound comparison"): each
+// machine at its highest volume into an audio interface, playing LSDJ's
+// 50 % pulse at C3, "great C" (65.41 Hz), shown as waveforms. A first-order
+// high-pass fits the original at 26 Hz (its "play it loud" edition at 29 Hz),
+// where Pan Docs' factor 0.999958 per clock gives 28 Hz; the original keeps
+// that factor. The Color's waveform falls away from each edge and undershoots,
+// which one pole cannot draw; two first-order high-passes fit it, at 176 Hz
+// and 47 Hz (the pairs within 20 % of the best fit's error span 132 to 216 Hz
+// and 36 to 66 Hz; Tools/fit_handheld_line.py). The Color takes the 47 Hz as its
+// capacitor and the 176 Hz after it, which Ken Shirriff's die analysis of
+// its IR3R53N explains: "an external feedback capacitor, which causes it to
+// act as a high-pass filter" (righto.com, 2020-06). Pan Docs' "use 0.998943
+// for MGB&CGB", one pole near 706 Hz, is neither. A Pocket, on the same
+// amplifier chip, fits 96 Hz and 25 Hz in the same recordings, 4.5 dB under
+// the original at 71 Hz, near kathoc's 2.8 dB (note.com, brickboy
+// Development Story #10, 2026-08-29): the corner is the board's capacitor,
+// not the chip's. The DAC's fade when it turns off, the amplifier's gain,
+// the headphone socket and speaker are not modelled (README, Known gaps).
 
 #include "../Chips/GameBoyApu.h"
 #include "../Driver/Waves.h"
@@ -63,8 +68,13 @@ public:
         tb_.Set(gb::kClock, 1, rate_);
         mix_.Clear();
         for (int s = 0; s < 2; ++s) {
-            capacitor_[s].Design(0.999958, rate_);
+            capacitor_[s].Design(revision == kColor ? kColorCapacitor : 0.999958, rate_);
             capacitor_[s].Reset();
+            if (revision == kColor)
+                amplifier_[s].Design(FirstOrder::Kind::HighPass, 176.0, rate_);
+            else
+                amplifier_[s].Design(FirstOrder::Kind::Pass, 0.0, rate_);
+            amplifier_[s].Reset();
             pinBlocker_[s].Reset();
         }
         dacsOn_ = false, dacsHeard_ = false, pending_ = 0;
@@ -222,7 +232,7 @@ public:
             for (int side = 0; side < 2; ++side) {
                 double y;
                 if (path == Path::Line)
-                    y = dacsHeard_ ? capacitor_[side].Process(bus[side][i]) : 0.0;
+                    y = amplifier_[side].Process(dacsHeard_ ? capacitor_[side].Process(bus[side][i]) : 0.0);
                 else
                     y = pinBlocker_[side].Process(bus[side][i]);
                 out[side][i] += static_cast<float>(y);
@@ -341,7 +351,11 @@ private:
     gb::Apu apu_;
     Timebase tb_;
     StepMix<1, 2> mix_;
+    // A capacitor's factor per clock for a corner f is 1 - 2 pi f / 4194304.
+    static constexpr double kColorCapacitor = 1.0 - 2.0 * 3.141592653589793 * 47.0 / 4194304.0;
+
     ChargeHighPass capacitor_[2];
+    FirstOrder amplifier_[2];   // the Color's feedback high-pass; the original's passes
     FirstOrder pinBlocker_[2];
     bool dacsOn_ = false, dacsHeard_ = false;
     Switch queue_[kQueue] {};
