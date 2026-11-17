@@ -5,7 +5,7 @@
 // the coupling capacitor after them.
 //
 // Revisions: Original (DMG) and Color (CGB), which differ in the APU's
-// quirks and in the capacitor's charge factor.
+// quirks.
 //
 // DACs (Pan Docs, Audio details, read 2026-11-17; spec): a DAC is on when
 // NRx2 & $F8 is not 0 (NR30 bit 7 for the wave channel); on, it maps digital
@@ -14,13 +14,22 @@
 // The mixer adds the channels NR51 sends to each side and scales each side
 // by NR50's volume + 1 over 8. Pin is that sum. Line adds the capacitor:
 // Pan Docs' out = in - capacitor, capacitor = in - out * factor, factor
-// 0.999958 per clock on the original and 0.998943 on the Color (reported),
-// with the output 0 and the capacitor held while every DAC is off. Pan
-// Docs gives the Color's figure only as a code comment ("use 0.998943 for
-// MGB&CGB"), from the old gbdev wiki with no measurement behind it; it puts
-// the corner near 706 Hz, kept until a capture settles it. The
-// DAC's fade when it turns off, the amplifier, headphone socket and speaker
-// are not modelled (README, Known gaps).
+// 0.999958 per clock (reported), a corner near 28 Hz, with the output 0 and
+// the capacitor held while every DAC is off.
+//
+// The Color takes the same factor (reported: a measurement of its sibling).
+// Pan Docs' "use 0.998943 for MGB&CGB" (blargg's Game Boy Sound Operation),
+// a corner near 706 Hz, is contradicted by a recording: kathoc (note.com,
+// brickboy Development Story #10, 2026-08-29) recorded a Pocket and an
+// original at their headphone sockets at 96 kHz, and at 71 Hz the Pocket was
+// 2.8 dB under the original, where 0.998943 predicts 20 dB. Fitted to that
+// recording, 706 Hz misses by 11.25 dB, the original's 28 Hz by 5.28 dB and
+// the best, 5 Hz, by 5.24 dB, so it rejects 706 Hz but cannot tell 28 Hz
+// from a lower corner. The Pocket's amplifier is the Color's chip: Gekkio's
+// MGB-ECPU-01 drawing names U3 AMP-MGB, and Ken Shirriff's die photo of the
+// Color's IR3R53N is marked AMP MGB. No recording of a Color itself was
+// found. The DAC's fade when it turns off, the amplifier, headphone socket
+// and speaker are not modelled (README, Known gaps).
 
 #include "../Chips/GameBoyApu.h"
 #include "../Driver/Waves.h"
@@ -53,9 +62,8 @@ public:
         apu_.Reset(revision == kColor ? gb::Model::Cgb : gb::Model::Dmg);
         tb_.Set(gb::kClock, 1, rate_);
         mix_.Clear();
-        const double factor = revision == kColor ? 0.998943 : 0.999958;
         for (int s = 0; s < 2; ++s) {
-            capacitor_[s].Design(factor, rate_);
+            capacitor_[s].Design(0.999958, rate_);
             capacitor_[s].Reset();
             pinBlocker_[s].Reset();
         }

@@ -58,9 +58,8 @@ private:
 };
 
 // Pan Docs, Audio details, Obscure Behavior: out = in - capacitor;
-// capacitor = in - out * factor, with factor 0.999958 per 4194304 Hz clock on
-// the original handheld and 0.998943 on the later ones, raised to
-// 4194304 / rate at another rate.
+// capacitor = in - out * factor, with factor per 4194304 Hz clock raised to
+// 4194304 / rate at another rate. The handheld board says which factor.
 class ChargeHighPass {
 public:
     void Design(double factorPerClock, double sampleRate) {

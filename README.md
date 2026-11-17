@@ -33,7 +33,7 @@ one-bit beeper.
 | # | Preset | Demo | Length | Peak |
 | --- | --- | --- | --- | --- |
 | 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -11.4 dBFS |
-| 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -19.2 dBFS |
+| 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -21.0 dBFS |
 | 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -10.1 dBFS |
 | 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -15.5 dBFS |
 | 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -4.8 dBFS |
@@ -50,6 +50,14 @@ Tools/update_readme_blocks.py demos --readme README.md --manifest
 WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
+
+### 0.2.1 — 2026-11-17 — the Color's bass
+
+- On Line, the Color's coupling capacitor is the original's, a corner near
+  28 Hz instead of Pan Docs' 706 Hz: a recording of the Pocket, which uses
+  the Color's amplifier chip, rejects 706 Hz. The Color keeps its bass:
+  Pocket Arp is 4.5 dB up in RMS and its peaks 1.8 dB down, since the
+  706 Hz corner had turned each pulse edge into a spike.
 
 ### 0.2.0 — 2026-11-17 — two cartridge boards on Line
 
@@ -128,8 +136,15 @@ state; the code is our own.
 - **DACs and mixer (spec):** a DAC on maps 0 to 15 to analog +1 to -1, off
   gives 0; NR51 sends channels to each side and NR50 scales the sides.
 - **Line (reported):** Pan Docs' coupling capacitor, factor 0.999958 per
-  clock on the original and 0.998943 on the Color, held while every DAC is
-  off. The amplifier, headphone socket and speaker are not modelled.
+  clock (a corner near 28 Hz), held while every DAC is off, on both
+  revisions. Pan Docs gives the Color 0.998943, a corner near 706 Hz, but a
+  recording of its sibling contradicts it: kathoc recorded a Pocket and an
+  original at their headphone sockets (note.com, brickboy Development Story
+  #10, 2026-08-29), and at 71 Hz the Pocket was 2.8 dB under the original
+  where 706 Hz predicts 20 dB. The Pocket's amplifier is the Color's chip
+  (AMP-MGB on Gekkio's MGB-ECPU-01 drawing and on Ken Shirriff's die photo
+  of the Color's IR3R53N). The amplifier, headphone socket and speaker are
+  not modelled.
 
 ### The console (NES, Famicom, PAL NES)
 
@@ -346,20 +361,25 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
 
 - **Analog stages without a source are not modelled.** The handheld's
   amplifier, headphone socket and speaker; any line stage of the PSG boards
-  and the micro; the micro's speaker. Their Line renders as Pin.
+  and the micro; the micro's speaker. Their Line renders as Pin. What is
+  published of them gives topologies, not a model: the original handheld's
+  and the Game Gear's headphone sockets couple through 100 uF, whose corner
+  is the load's (about 50 Hz into 32 Ohm headphones, under 1 Hz into a line
+  input); the
+  Master System 1 buffers the VDP's sound pin with one transistor and a
+  series capacitor whose values are not legible in the scanned manuals;
+  the amplifiers' gains and clipping points are not published.
 - **The handheld.** The DAC's fade when it turns off ("varies between
   models", Pan Docs), the zombie writes other than $08 and the wave
   channel's start-up delay are not modelled; the commonly used 6-cycle
-  delay traces only to a forum post pointing at copyleft code. The Color's
-  capacitor factor puts its high-pass corner near 706 Hz, which thins
-  everything it plays. Pan Docs gives 0.998943 only as a comment, "use
-  0.998943 for MGB&CGB", in code "applied at 4194304 Hz", and the figure
-  goes back to the old gbdev wiki with no measurement behind it (RavenCore
-  pull request 43). Ken Shirriff's die analysis confirms the direction:
-  the Color's amplifier "has an external feedback capacitor, which causes
-  it to act as a high-pass filter", but its capacitor values are not
-  published. We keep Pan Docs' figure, reported, until a capture of a
-  Color's output settles the corner.
+  delay traces only to a forum post pointing at copyleft code. No published
+  source gives the fade's decay times. The Color's capacitor is its
+  sibling's measurement, not its own: no recording of a Color's output was
+  found, and the Pocket's recording rejects 706 Hz without fixing the
+  corner, since 28 Hz misses it by 5.28 dB and the best fit, 5 Hz, by
+  5.24 dB. Ken Shirriff's die analysis says the Color's amplifier "has an
+  external feedback capacitor, which causes it to act as a high-pass
+  filter"; its value is not published.
 - **The console.** The APU mixer is the wiki's approximation; the PAL
   console's line stage is the NTSC front-loader's, assumed. The MMC5 is
   mixed linearly at the APU pulse's step (our reading of "equivalent in
@@ -370,17 +390,26 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   needs "a soft knee curve" but gave none, and that the curve's control
   sees "a different, weaker highpass" than the output, which his later
   filter list (12, 20 and 12 Hz) does not separate; the 5B's polarity
-  against the APU is unstated. The MMC5 board's amplifier is taken as
+  against the APU is unstated. The clip_5b table in nes-audio-tests, his
+  measured mixes of the 5B's three squares, carries this knee as its
+  model: the measurements sit within 0.55 dB of it from volume 12 up and
+  start to compress about half a dB before the threshold, a softer onset
+  no published curve gives. The MMC5 board's amplifier is taken as
   inverting with a virtual-ground input; an older copy of the wiki's
   drawing shows its inputs the other way round. The survey thread (NESdev
   forum t=17741) also puts one VRC6 cartridge 1.1 dB under the APU's
   square and the 163's cartridges from 11.6 to 19.2 dB over it, against
-  the wiki's figures used here.
+  the wiki's figures used here. NES 2.0 sorts the 163's boards into three
+  measured bands, 11 to 13, 16 to 17 and 18 to 19.5 dB (submappers 3 to
+  5), which the boards' resistors do not predict; ours is the first.
 - **The PSG.** Two volume tables are published for Sega's consoles and they
   disagree; we use SMS Power's 2 dB steps. The Master System 2's output
   clipping is not modelled.
 - **The micro.** The AY's three outputs are tied through resistors and
-  interact on the real board; here they sum independently. The 128K's
+  interact on the real board; here they sum independently. The AY's pins
+  are unbuffered NMOS stages into a shared load, which would make them
+  compress together; the grey +2's parts list has 1.8 kOhm resistors beside
+  the AY (R49 to R51), but no 128K's values or measured mix is published. The 128K's
   beeper pin and its mix with the AY are unsourced: it takes the Issue 3's
   levels, and by our convention the beeper's swing equals one AY channel at
   full volume. Pin 28 falls slowly after EAR goes low (World of Spectrum:
@@ -397,9 +426,9 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   Pin blocker, the per-board
   level reference, Double's detune and oversampling's decimator are ours,
   not the hardware's.
-- **Presets are not level-matched.** The demos span about -37 to -16 dBFS
-  RMS: a quiet Color pulse through its 706 Hz corner, a four-console disk
-  organ. A preset Volume trim from a level tool is to come.
+- **Presets are not level-matched.** The demos span about -34 to -17 dBFS
+  whole-file RMS, from a periodic-noise bass and a Color arpeggio to a
+  four-console disk organ. A preset Volume trim from a level tool is to come.
 - **Not measured.** No value here is our own capture of real hardware yet;
   every analog figure is reported. No one has listened to these demos
   against the machines.
