@@ -22,7 +22,24 @@
 // not the AY's level or how its pins are joined. Pin 28's slow fall after
 // EAR goes low (World of Spectrum) is put down to the EAR/MIC network (R36,
 // C32, R37, C35); no published model fits its timings, so the pin steps at
-// once. No speaker or socket stage is modelled, so Line renders as Pin.
+// once.
+//
+// Line on the 128K is its TV sound, the modulator's input (128K service
+// manual; spec): the ULA through R112 and C123 (68 kOhm, 1 uF) and the AY
+// through R132 and C127 (39 kOhm, 1 uF) into one node, which weights the
+// beeper's pin by 39 / 107 and the AY's by 68 / 107. The AY's DAC swings
+// 0 to 1 V (the AY data manual, 3.7: "a normalized voltage range of from 0
+// to 1 Volt"; spec), and its three pins are tied straight together on the
+// 128K's board (the tracks between pins 1, 4 and 5 of IC32; Octocom,
+// "Articulo 4"), taken here as the pins' average (estimate: equal, linear
+// output resistances; the real pins interact, README, Known gaps). The
+// beeper's pin swings Issue 3's 0.66 to 3.70 V (sibling: the 48K Issue 3).
+// So on Line the beeper stands 3 x 39 / 68 x 3.04 = 5.2 times, 14.4 dB,
+// over one AY channel at full volume, which keeps its Pin level; the two
+// couplings, 1 uF each in series around 107 kOhm, high-pass at 3.0 Hz
+// (estimate: the modulator's input taken as high). The 48K's modulator
+// carries no sound and no socket or speaker stage is modelled, so its Line
+// renders as Pin.
 //
 // The beeper's notes run the ROM's BEEPER loop: the first OUT 209 - 12 (L
 // mod 4) T-states after the call (its setup and first, shortened pass), then
@@ -59,6 +76,7 @@ public:
     void Prepare(int sampleRate) {
         rate_ = sampleRate;
         DesignPinBlocker(pinBlocker_, sampleRate);
+        tvCoupling_.Design(FirstOrder::Kind::HighPass, kTvCouplingHz, sampleRate);
     }
 
     void Reset(int revision) noexcept {
@@ -69,11 +87,15 @@ public:
         beeper_.Reset();
         mix_.Clear();
         pinBlocker_.Reset();
+        tvCoupling_.Reset();
         for (Shadow& s : shadow_)
             s = Shadow {};
         beeping_ = false, stopping_ = false, ear_ = false;
         AyWrite(7, 0x3F);
-        // The beeper's DAC at rest, before any note.
+        // The beeper's pin at rest, before any note, is the bus's zero: the
+        // machine was on long before the first key, so its couplings have
+        // long settled and switching it in does not thump (ours).
+        restVolts_ = PinVolts();
         BeeperChanged(tb_.Start());
     }
 
@@ -151,12 +173,17 @@ public:
         Write(channel, s, false);
     }
 
-    void Render(int frames, Path, float* left, float* right) {
+    void Render(int frames, Path path, float* left, float* right) {
         RunTo(tb_.CycleAt(frames));
-        float bus[StepBuffer::kMaxFrames] {};
-        mix_.Read(0, bus, frames);
+        const bool tv = path == Path::Line && HasAy();
+        // Bus 0 is the AY's three pins summed, bus 1 the beeper's pin in volts.
+        float bus[2][StepBuffer::kMaxFrames] {};
+        mix_.Read(0, bus[0], frames);
+        mix_.Read(1, bus[1], frames);
         for (int i = 0; i < frames; ++i) {
-            const float y = static_cast<float>(pinBlocker_.Process(bus[i]));
+            const double pin = bus[1][i];
+            const float y = static_cast<float>(tv ? tvCoupling_.Process(bus[0][i] + kTvBeeperPerVolt * pin)
+                                                  : pinBlocker_.Process(bus[0][i] + pin / (3.70 - 0.66)));
             left[i] += y;
             right[i] += y;
         }
@@ -281,15 +308,18 @@ private:
         double level = 0.0;
         for (int c = 0; c < 3; ++c)
             level += kAyLevel[ay_.Out(c)];
-        const float levels[1] = { static_cast<float>(level) };
+        const float levels[2] = { static_cast<float>(level), 0.0f };
         mix_.Set(0, tb_.Position(cycle, StepBuffer::kSubBits), levels);
     }
 
-    void BeeperChanged(std::int64_t cycle) noexcept {
+    [[nodiscard]] double PinVolts() const noexcept {
         static constexpr double kIssue3[4] = { 0.34, 0.66, 3.56, 3.70 };
         static constexpr double kIssue2[4] = { 0.39, 0.73, 3.66, 3.79 };
-        const double* volts = revision_ == k48KIssue2 ? kIssue2 : kIssue3;
-        const float levels[1] = { static_cast<float>(volts[beeper_.Out()] / (3.70 - 0.66)) };
+        return (revision_ == k48KIssue2 ? kIssue2 : kIssue3)[beeper_.Out()];
+    }
+
+    void BeeperChanged(std::int64_t cycle) noexcept {
+        const float levels[2] = { 0.0f, static_cast<float>(PinVolts() - restVolts_) };
         mix_.Set(1, tb_.Position(cycle, StepBuffer::kSubBits), levels);
     }
 
@@ -319,8 +349,16 @@ private:
     ay::Chip ay_;
     zx::Beeper beeper_;
     Timebase tb_;
-    StepMix<2, 1> mix_;
+    // The TV node's beeper, a volt on its pin, in units of one AY channel
+    // at full volume there: (39 / 107) / ((68 / 107) / 3) per volt.
+    static constexpr double kTvBeeperPerVolt = 3.0 * 39.0 / 68.0;
+    // 1 uF and 1 uF in series (0.5 uF) around 68 + 39 kOhm.
+    static constexpr double kTvCouplingHz = 1.0 / (2.0 * 3.141592653589793 * 107e3 * 0.5e-6);
+
+    StepMix<2, 2> mix_;
     FirstOrder pinBlocker_;
+    FirstOrder tvCoupling_;
+    double restVolts_ = 0.0;   // the pin at rest, the beeper bus's zero
     Shadow shadow_[kChannels];
     bool beeping_ = false, stopping_ = false, ear_ = false;
     std::int64_t due_ = 0, hl_ = 0;

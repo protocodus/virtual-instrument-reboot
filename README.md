@@ -38,8 +38,8 @@ one-bit beeper.
 | 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -15.5 dBFS |
 | 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -4.8 dBFS |
 | 10 | Periodic Bass | [10-periodic-bass.wav](Docs/audio/10-periodic-bass.wav) | 8.3 s | -19.1 dBFS |
-| 13 | Buzz Bass | [13-buzz-bass.wav](Docs/audio/13-buzz-bass.wav) | 8.3 s | -14.9 dBFS |
-| 14 | One-Bit Melody | [14-one-bit-melody.wav](Docs/audio/14-one-bit-melody.wav) | 8.4 s | -14.2 dBFS |
+| 13 | Buzz Bass | [13-buzz-bass.wav](Docs/audio/13-buzz-bass.wav) | 8.3 s | -17.6 dBFS |
+| 14 | One-Bit Melody | [14-one-bit-melody.wav](Docs/audio/14-one-bit-melody.wav) | 8.4 s | -16.9 dBFS |
 
 <!-- audio-demos-end -->
 
@@ -50,6 +50,17 @@ Tools/update_readme_blocks.py demos --readme README.md --manifest
 WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
+
+### 0.2.3 — 2026-11-17 — the 128K's TV sound
+
+- On Line, the 128K now plays through its TV modulator's input, from its
+  service manual: the beeper's pin through 68 kOhm and the AY through
+  39 kOhm into one node. The beeper stands about 14 dB over one AY channel
+  there, where Pin keeps them level. The AY's 0 to 1 V is the AY data
+  manual's; the tied AY pins taken as their average and the 128K's pin
+  taken as the 48K Issue 3's are a labelled estimate and sibling value
+  (Known gaps), under the owner's new rule that sibling units and
+  estimates may fill a gap until better material arrives.
 
 ### 0.2.2 — 2026-11-17 — the Color's Line from its own recording
 
@@ -118,14 +129,17 @@ keys ─▶ playing layer ─▶ register writes at chip cycles ─▶ chip core
 ```
 
 **Where every value comes from.** Each mechanism carries one of these tags
-in the code beside it, and nothing is filled in with a plausible number: a
-stage that no source describes is left out and listed under Known gaps.
+in the code beside it. A stage that nothing defensible describes is left out
+and listed under Known gaps, and so is every sibling value and estimate, to
+be replaced when a source arrives.
 
 | Tag | Meaning |
 | --- | --- |
 | spec | stated by the maker's documents or an authoritative technical reference (Pan Docs, the NESdev Wiki, SMS Power, the AY data manual, World of Spectrum's tech notes) |
 | reported | a measurement or fit someone else published, cited beside the code; it ships labelled until our own measurement replaces it |
 | ours | the playing layer and the conventions that let a keyboard play the chips; never claimed as hardware |
+| sibling | a value a closely related unit or board documents, borrowed with the reason it transfers |
+| estimate | a typical part or an engineering judgement, with its reasoning beside it |
 
 No die-level netlist was read, no emulator's code was copied, and no
 copyleft or non-commercial source was read. Ayumi (MIT), MAME's ay8910 and
@@ -257,12 +271,18 @@ state; the code is our own.
   and plays 23 cents sharp on the 128K. Neither counts the contention,
   which leaves the top octave flat by up to 9 cents on the 48K and 16 on
   the 128K. Revisions: the 128K, the 48K Issue 3 and the 48K Issue 2.
-- **Line:** no speaker or socket stage is modelled, so Line renders as Pin.
-  The 128K's service manual gives one part of its TV sound: the modulator
-  takes the ULA through 68 kOhm and 1 uF (R112, C123) and the AY through
-  39 kOhm and 1 uF (R132, C127); the AY's output level and how its three
-  pins are joined are not published, so the mix stays our convention
-  (Known gaps).
+- **Line (spec, sibling and estimate):** the 128K's TV sound. Its service
+  manual's modulator input takes the ULA through 68 kOhm and 1 uF (R112,
+  C123) and the AY through 39 kOhm and 1 uF (R132, C127); the AY data
+  manual gives the AY's DAC "a normalized voltage range of from 0 to 1
+  Volt"; the 128K's board ties the AY's three pins straight together
+  (Octocom's stereo modification cuts the tracks between pins 1, 4 and 5),
+  taken here as their average (estimate); and the 128K's sound pin takes
+  the 48K Issue 3's swing (sibling). So on Line the beeper stands 14.4 dB
+  over one AY channel at full volume, and the couplings high-pass at
+  3.0 Hz (estimate: the modulator's input taken as high). The 48K's
+  modulator carries no sound and no speaker or socket stage is modelled,
+  so its Line renders as Pin.
 
 ### The band-limited renderer
 
@@ -375,7 +395,7 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
 
 - **Analog stages without a source are not modelled.** The handheld's
   amplifier, headphone socket and speaker; any line stage of the PSG boards
-  and the micro; the micro's speaker. Their Line renders as Pin. What is
+  and the 48K; the micro's speaker. Their Line renders as Pin. What is
   published of them gives topologies, not a model: the original handheld's
   and the Game Gear's headphone sockets couple through 100 uF, whose corner
   is the load's (about 50 Hz into 32 Ohm headphones, under 1 Hz into a line
@@ -445,6 +465,10 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   and MIC sockets (R36 680 Ohm, C32 100 nF, R37 1 kOhm and C35 10 nF on
   the EAR side, from the 48K service manual's parts list). No published
   model of that network fits the timings, so the pin steps at once.
+  On the 128K's Line the AY's tied pins are averaged (estimate); real
+  NMOS outputs tied together interact and would not sum linearly, and the
+  128K's own pin voltages and the modulator's input impedance are not
+  published.
   Some machines run every ULA timing one T-state later than the
   references; ours are the references'.
 - **Ours, by design.** The playing layer, the handheld's wave counts past

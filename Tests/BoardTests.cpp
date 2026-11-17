@@ -6,6 +6,7 @@
 #include "DSP/Driver/Machine.h"
 #include "DSP/Render/Decimator.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -375,7 +376,7 @@ void TestLevels(Machine& m) {
     // Line: the console's stage is a high-pass at 90 Hz (front-loader) or
     // 37 Hz (Famicom), so a 60 Hz square loses more on the front-loader;
     // the handheld's capacitor passes 440 Hz nearly whole; the PSG and the
-    // micro have no line stage, so Line is Pin.
+    // 48K have no line stage, so Line is Pin.
     const double front = level(console, 2, Voice::Triangle, 60.0, 0, 15, Path::Line)
                          / level(console, 2, Voice::Triangle, 60.0, 0, 15, Path::Pin);
     const double fami = level(famicom, 2, Voice::Triangle, 60.0, 0, 15, Path::Line)
@@ -440,13 +441,41 @@ void TestLevels(Machine& m) {
         Check(std::fabs(Db(later / expected)) < 0.2,
               "the color's line at 65 Hz " + std::to_string(Db(later)) + " dB against " + std::to_string(Db(expected)));
     }
-    for (const MachineSettings& s : { MachineSettings { BoardKind::Psg, 0, 0, 4, 0 }, micro }) {
+    for (const MachineSettings& s : { MachineSettings { BoardKind::Psg, 0, 0, 4, 0 }, MachineSettings { BoardKind::Micro, 1, 0, 4, 0 } }) {
         m.Prepare(kRate);
         m.Reset(s);
-        const ChannelSettings n = Note(m, 0, Voice::Tone, 330.0, 0);
-        const Render pin = Play(m, s, 0, n, 0.5, Path::Pin);
-        const Render line = Play(m, s, 0, n, 0.5, Path::Line);
+        const int channel = s.board == BoardKind::Micro ? Micro::kBeeper : 0;
+        const Voice voice = s.board == BoardKind::Micro ? Voice::Beeper : Voice::Tone;
+        const ChannelSettings n = Note(m, channel, voice, 330.0, 0);
+        const Render pin = Play(m, s, channel, n, 0.5, Path::Pin);
+        m.Reset(s);
+        const Render line = Play(m, s, channel, n, 0.5, Path::Line);
         Check(pin.left == line.left, "a board without a line stage renders Line differently");
+    }
+    // The beeper's pin at rest is the bus's zero, so a micro switched in
+    // before any note is silent on both paths, with no thump.
+    for (int revision : { 0, 1, 2 })
+        for (Path path : { Path::Pin, Path::Line }) {
+            const MachineSettings s { BoardKind::Micro, revision, 0, 4, 0 };
+            m.Prepare(kRate);
+            m.Reset(s);
+            std::vector<float> l(4800, 0.0f), r(4800, 0.0f);
+            for (int done = 0; done < 4800; done += 240)
+                m.Render(240, path, l.data() + done, r.data() + done);
+            float peak = 0.0f;
+            for (float v : l)
+                peak = std::max(peak, std::fabs(v));
+            Check(peak < 1e-6f, "a micro at rest thumps: " + std::to_string(peak));
+        }
+    // The 128K's TV node (Boards/Micro.h): an AY channel keeps its level and
+    // the beeper stands 3 x 39 / 68 x 3.04 V over it, 14.4 dB.
+    {
+        const double ayLine = level(micro, 0, Voice::Tone, 440.0, 0, 15, Path::Line);
+        Check(std::fabs(Db(ayLine / ayTone)) < 0.02, "the 128k's line ay level " + std::to_string(Db(ayLine / ayTone)));
+        const double beeperLine = level(micro, Micro::kBeeper, Voice::Beeper, 440.0, 0, 15, Path::Line);
+        const double want = 3.0 * 39.0 / 68.0 * (3.70 - 0.66);
+        Check(std::fabs(Db(beeperLine / ayLine / want)) < 0.05,
+              "the 128k's line beeper " + std::to_string(Db(beeperLine / ayLine)) + " dB over the ay");
     }
 
     // Stereo: the handheld and the PSG send every channel to both sides.

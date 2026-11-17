@@ -240,9 +240,17 @@ the WAVs to `Docs/audio/`, rewrite the README table with
   its code: **spec** (the maker's documents or an authoritative technical
   reference), **reported** (someone else's published measurement or fit,
   cited) or **ours** (the playing layer and the conventions a keyboard
-  needs). A stage that no source describes is left out and listed under
-  README, Known gaps; it is never filled in with a plausible number. A
-  listening test may choose between sourced candidates, never a number.
+  needs), and two more for what fills a gap until better material comes
+  (owner, 2026-11-17: "use your judgement or similar / siblings units to
+  fill the gaps before we have better materials"): **sibling** (a value a
+  closely related unit or board documents, borrowed with the reason it
+  transfers) and **estimate** (a typical part or an engineering judgement,
+  with its reasoning beside it). Prefer spec, then reported, then sibling,
+  then estimate. A gap nothing defensible can fill, such as a clipping
+  level or a curve no one has drawn, stays out and stays listed under
+  README, Known gaps; every sibling and estimate is listed there too, so it
+  is replaced when a source arrives. A listening test may choose between
+  candidates, never invent a number.
 - **Clean room.** Read the documents, and permissively licensed code (MIT,
   BSD, ISC, CC0) for the rules it states; copy no one's code. Never read
   GPL, LGPL or non-commercial emulator source. A ROM disassembly read for a
