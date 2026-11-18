@@ -51,25 +51,19 @@ const std::vector<Setup>& Setups() {
         { "console n163 x8", { BoardKind::Console, 1, Console::kN163, 8, 0 } },
         { "console fds", { BoardKind::Console, 1, Console::kFds, 4, 0 } },
         { "console 5b", { BoardKind::Console, 1, Console::k5B, 4, 0 } },
-        { "psg sega", { BoardKind::Psg, 0, 0, 4, 0 } },
-        { "psg sega handheld", { BoardKind::Psg, 1, 0, 4, 0 } },
-        { "psg ti", { BoardKind::Psg, 2, 0, 4, 0 } },
-        { "micro 128k", { BoardKind::Micro, 0, 0, 4, 0 } },
-        { "micro 48k", { BoardKind::Micro, 1, 0, 4, 0 } },
-        { "micro 48k issue 2", { BoardKind::Micro, 2, 0, 4, 0 } },
     };
     return list;
 }
 
 // The frequency a period plays, from the documents (each board's PeriodFor
 // cites the same formulas; these are written out again on purpose).
-double Expected(const MachineSettings& s, Voice voice, int channel, std::int64_t p, int shape) {
+double Expected(const MachineSettings& s, Voice voice, std::int64_t p) {
     const double period = static_cast<double>(p);
     switch (s.board) {
     case BoardKind::Handheld:
         // Pan Docs: 131072 / (2048 - x), the wave channel 65536 / (2048 - x).
         return (voice == Voice::Wave ? 65536.0 : 131072.0) / period;
-    case BoardKind::Console: {
+    default: {
         const double cpu = s.revision == Console::kPal ? kPalCpu : kNtscCpu;
         switch (voice) {
         case Voice::Triangle: return cpu / (32.0 * (period + 1.0));     // APU Triangle
@@ -84,55 +78,7 @@ double Expected(const MachineSettings& s, Voice voice, int channel, std::int64_t
         default: return cpu / (32.0 * period);                         // Sunsoft 5B audio
         }
     }
-    case BoardKind::Psg: {
-        // SMS Power: clock / (32 N); the periodic noise on tone 3 cycles
-        // every 16 shifts (Sega) or 15 (TI), each two tone-3 toggles.
-        const double clock = 3579545.0;
-        if (voice == Voice::Bass)
-            return clock / (32.0 * (s.revision == Psg::kTiComputer ? 15.0 : 16.0) * period);
-        return clock / (32.0 * period);
     }
-    default: {
-        const double cpu = s.revision == Micro::k128K ? 3546900.0 : 3500000.0;
-        if (channel == Micro::kBeeper)
-            return cpu / (2.0 * (4.0 * period + 118.0));               // the ROM's BEEPER loop
-        if (voice == Voice::Buzzer)                                     // 32 envelope steps of 16 EP
-            return cpu / ((shape & 2 ? 1024.0 : 512.0) * period);
-        return cpu / (32.0 * period);                                   // AY at CPU / 2: f / (16 TP)
-    }
-    }
-}
-
-// The beeper's mean frequency over a note started at cycle 0, rendered for
-// `seconds` and measured from `skip`: the BEEPER loop's OUT ($FE) every
-// 4 HL + 118 T-states, the first 209 - 12 (L mod 4) after the call, each
-// held by the ULA (World of Spectrum, 48K and 128K references): its I/O
-// cycle's second T-state, 3 before the OUT ends, waits 6, 5, 4, 3, 2, 1, 0
-// or 0 T-states through the first 128 of each of the 192 screen lines,
-// from 14335 of the 48K's 69888 (224 a line) or 14361 of the 128K's 70908
-// (228 a line).
-double BeeperHz(int revision, std::int64_t hl, double seconds, double skip) {
-    const bool is128 = revision == Micro::k128K;
-    const double cpu = is128 ? 3546900.0 : 3500000.0;
-    const std::int64_t frame = is128 ? 70908 : 69888, line = is128 ? 228 : 224, first = is128 ? 14361 : 14335;
-    const auto held = [&](std::int64_t end) {
-        const std::int64_t at = (end - 3) % frame;
-        if (at < first || at >= first + 192 * line || (at - first) % line >= 128)
-            return end;
-        const std::int64_t k = (at - first) % line % 8;
-        return end + (k < 6 ? 6 - k : 0);
-    };
-    std::int64_t out = held(209 - 12 * (hl & 3)), from = -1, to = -1, count = 0;
-    while (static_cast<double>(out) < seconds * cpu) {
-        if (static_cast<double>(out) >= skip * cpu) {
-            if (from < 0)
-                from = out;
-            to = out;
-            ++count;
-        }
-        out = held(out + 4 * hl + 118);
-    }
-    return 0.5 * static_cast<double>(count - 1) * cpu / static_cast<double>(to - from);
 }
 
 struct Render {
@@ -219,8 +165,6 @@ void TestPitch(Machine& m) {
         for (int i = 0; i < Machine::kParts; ++i)
             if (m.PartOf(i).count > 0)
                 parts.push_back(m.PartOf(i));
-        if (setup.settings.board == BoardKind::Psg)
-            parts.push_back(m.FallbackOf(m.PartOf(0)));
         for (const Part& part : parts) {
             if (part.voice == Voice::Noise)
                 continue;
@@ -234,10 +178,10 @@ void TestPitch(Machine& m) {
                         continue;
                     const std::string what = std::string(setup.name) + " channel " + std::to_string(part.first) + " shape "
                                              + std::to_string(shape) + " key " + std::to_string(key);
-                    const double f = Expected(setup.settings, part.voice, part.first, period, shape);
+                    const double f = Expected(setup.settings, part.voice, period);
                     // The period is the nearest whole one in pitch.
-                    const double up = Expected(setup.settings, part.voice, part.first, period + 1, shape);
-                    const double down = Expected(setup.settings, part.voice, part.first, period - 1, shape);
+                    const double up = Expected(setup.settings, part.voice, period + 1);
+                    const double down = Expected(setup.settings, part.voice, period - 1);
                     Check(std::fabs(Cents(f, hz)) <= std::fabs(Cents(up, hz)) + 1.0e-9
                               && std::fabs(Cents(f, hz)) <= std::fabs(Cents(down, hz)) + 1.0e-9,
                           what + ": the period is not the nearest");
@@ -252,13 +196,8 @@ void TestPitch(Machine& m) {
                     const double seconds = f < 60.0 ? 2.5 : 1.2;
                     const Render r = Play(m, setup.settings, part.first, note, seconds, Path::Pin);
                     const double got = Measure(r.left, f, kRate, 0.3);
-                    // The ULA slows the beeper's loop; the period is still
-                    // chosen on the loop's own timing, as BEEP chooses it.
-                    const double want = setup.settings.board == BoardKind::Micro && part.first == Micro::kBeeper
-                                            ? BeeperHz(setup.settings.revision, period, seconds, 0.3)
-                                            : f;
-                    Check(got > 0.0 && std::fabs(Cents(got, want)) < 0.5,
-                          what + ": plays " + std::to_string(got) + " Hz, the documents give " + std::to_string(want));
+                    Check(got > 0.0 && std::fabs(Cents(got, f)) < 0.5,
+                          what + ": plays " + std::to_string(got) + " Hz, the documents give " + std::to_string(f));
                 }
                 Check(measured >= 3, std::string(setup.name) + " channel " + std::to_string(part.first)
                                          + ": too few notes measured (" + std::to_string(measured) + ")");
@@ -279,8 +218,6 @@ void TestRanges(Machine& m) {
         { { BoardKind::Handheld, 0, 0, 4, 0 }, 0, Voice::Pulse, 131072.0 / 2048.0 },   // 64 Hz
         { { BoardKind::Console, 0, 0, 4, 0 }, 0, Voice::Pulse, kNtscCpu / (16.0 * 2048.0) },
         { { BoardKind::Console, 0, 0, 4, 0 }, 2, Voice::Triangle, kNtscCpu / (32.0 * 2048.0) },
-        { { BoardKind::Psg, 0, 0, 4, 0 }, 0, Voice::Tone, 3579545.0 / (32.0 * 1023.0) },
-        { { BoardKind::Psg, 0, 0, 4, 0 }, 3, Voice::Bass, 3579545.0 / (32.0 * 16.0 * 1023.0) },
     };
     for (const Range& r : ranges) {
         m.Prepare(kRate);
@@ -352,31 +289,9 @@ void TestLevels(Machine& m) {
     const double fds = cart(Console::kFds, 4, Voice::ModWave, 3, 110.0);
     Check(fds > 2.4 * 0.97 && fds < 2.4 * 1.001, "fds square level " + std::to_string(fds));
 
-    // SMS Power: an output bit of 0 or 1, 2 dB a step of attenuation.
-    for (int revision : { 0, 2 }) {
-        const MachineSettings psg { BoardKind::Psg, revision, 0, 4, 0 };
-        const double full = level(psg, 0, Voice::Tone, 440.0, 0);
-        Check(std::fabs(full - 0.5) < 0.005, "psg tone level " + std::to_string(full));
-        const double down = level(psg, 0, Voice::Tone, 440.0, 0, 13);
-        Check(std::fabs(Db(down / full) + 4.0) < 0.02, "psg attenuation is not 2 dB a step");
-    }
-
-    // The micro: an AY channel at full volume and the beeper's swing at MIC
-    // off are one level by our convention, on both DAC tables.
-    const MachineSettings micro { BoardKind::Micro, 0, 0, 4, 0 };
-    const double ayTone = level(micro, 0, Voice::Tone, 440.0, 0);
-    Check(std::fabs(ayTone - 0.5) < 0.005, "ay tone level " + std::to_string(ayTone));
-    const double beeper = level(micro, Micro::kBeeper, Voice::Beeper, 440.0, 0);
-    Check(std::fabs(Db(beeper / ayTone)) < 0.05, "beeper level " + std::to_string(beeper));
-    // World of Spectrum's pin voltages: Issue 2's swing is 3.06 V to Issue
-    // 3's 3.04 V on the same scale.
-    const double issue2 = level({ BoardKind::Micro, 2, 0, 4, 0 }, Micro::kBeeper, Voice::Beeper, 440.0, 0);
-    Check(std::fabs(issue2 / beeper - (3.79 - 0.73) / (3.70 - 0.66)) < 0.003, "issue 2 beeper level");
-
     // Line: the console's stage is a high-pass at 90 Hz (front-loader) or
     // 37 Hz (Famicom), so a 60 Hz square loses more on the front-loader;
-    // the handheld's capacitor passes 440 Hz nearly whole; the PSG and the
-    // 48K have no line stage, so Line is Pin.
+    // the handheld's capacitor passes 440 Hz nearly whole.
     const double front = level(console, 2, Voice::Triangle, 60.0, 0, 15, Path::Line)
                          / level(console, 2, Voice::Triangle, 60.0, 0, 15, Path::Pin);
     const double fami = level(famicom, 2, Voice::Triangle, 60.0, 0, 15, Path::Line)
@@ -441,44 +356,7 @@ void TestLevels(Machine& m) {
         Check(std::fabs(Db(later / expected)) < 0.2,
               "the color's line at 65 Hz " + std::to_string(Db(later)) + " dB against " + std::to_string(Db(expected)));
     }
-    for (const MachineSettings& s : { MachineSettings { BoardKind::Psg, 0, 0, 4, 0 }, MachineSettings { BoardKind::Micro, 1, 0, 4, 0 } }) {
-        m.Prepare(kRate);
-        m.Reset(s);
-        const int channel = s.board == BoardKind::Micro ? Micro::kBeeper : 0;
-        const Voice voice = s.board == BoardKind::Micro ? Voice::Beeper : Voice::Tone;
-        const ChannelSettings n = Note(m, channel, voice, 330.0, 0);
-        const Render pin = Play(m, s, channel, n, 0.5, Path::Pin);
-        m.Reset(s);
-        const Render line = Play(m, s, channel, n, 0.5, Path::Line);
-        Check(pin.left == line.left, "a board without a line stage renders Line differently");
-    }
-    // The beeper's pin at rest is the bus's zero, so a micro switched in
-    // before any note is silent on both paths, with no thump.
-    for (int revision : { 0, 1, 2 })
-        for (Path path : { Path::Pin, Path::Line }) {
-            const MachineSettings s { BoardKind::Micro, revision, 0, 4, 0 };
-            m.Prepare(kRate);
-            m.Reset(s);
-            std::vector<float> l(4800, 0.0f), r(4800, 0.0f);
-            for (int done = 0; done < 4800; done += 240)
-                m.Render(240, path, l.data() + done, r.data() + done);
-            float peak = 0.0f;
-            for (float v : l)
-                peak = std::max(peak, std::fabs(v));
-            Check(peak < 1e-6f, "a micro at rest thumps: " + std::to_string(peak));
-        }
-    // The 128K's TV node (Boards/Micro.h): an AY channel keeps its level and
-    // the beeper stands 3 x 39 / 68 x 3.04 V over it, 14.4 dB.
-    {
-        const double ayLine = level(micro, 0, Voice::Tone, 440.0, 0, 15, Path::Line);
-        Check(std::fabs(Db(ayLine / ayTone)) < 0.02, "the 128k's line ay level " + std::to_string(Db(ayLine / ayTone)));
-        const double beeperLine = level(micro, Micro::kBeeper, Voice::Beeper, 440.0, 0, 15, Path::Line);
-        const double want = 3.0 * 39.0 / 68.0 * (3.70 - 0.66);
-        Check(std::fabs(Db(beeperLine / ayLine / want)) < 0.05,
-              "the 128k's line beeper " + std::to_string(Db(beeperLine / ayLine)) + " dB over the ay");
-    }
-
-    // Stereo: the handheld and the PSG send every channel to both sides.
+    // Stereo: the handheld sends every channel to both sides.
     {
         m.Prepare(kRate);
         m.Reset(handheld);
@@ -515,7 +393,7 @@ void TestStopAndRates(Machine& m) {
     for (const Setup& setup : Setups()) {
         m.Prepare(kRate);
         m.Reset(setup.settings);
-        const Part part = m.PartOf(setup.settings.board == BoardKind::Micro && !m.MicroBoard().HasAy() ? 3 : 0);
+        const Part part = m.PartOf(0);
         ChannelSettings n = Note(m, part.first, part.voice, 440.0, 1);
         Render r = Play(m, setup.settings, part.first, n, 0.5, Path::Pin);
         m.Stop(part.first);
@@ -527,9 +405,7 @@ void TestStopAndRates(Machine& m) {
             late = std::fmax(late, std::fabs(tail[i]));
         Check(late < 1.0e-3, std::string(setup.name) + ": still sounding half a second after Stop (" + std::to_string(late) + ")");
 
-        const bool beeper = setup.settings.board == BoardKind::Micro && part.first == Micro::kBeeper;
-        const double f = beeper ? BeeperHz(setup.settings.revision, n.period, 1.0, 0.3)
-                                : Expected(setup.settings, part.voice, part.first, n.period, 1);
+        const double f = Expected(setup.settings, part.voice, n.period);
         for (int rate : { 44100, 96000, 192000 }) {
             m.Prepare(rate);
             m.Reset(setup.settings);
@@ -539,6 +415,29 @@ void TestStopAndRates(Machine& m) {
                                                        + std::to_string(got) + " for " + std::to_string(f));
         }
     }
+}
+
+// A machine chosen starts as one that has stood at rest (Console::Reset):
+// the triangle's held step and the DMC's level reach no output, on either
+// path, however high Bias holds it.
+void TestRestAfterReset(Machine& m) {
+    for (const Setup& setup : Setups())
+        for (int bias : { 0, 127 })
+            for (Path path : { Path::Pin, Path::Line }) {
+                MachineSettings s = setup.settings;
+                s.bias = bias;
+                m.Prepare(kRate);
+                m.Reset(s);
+                std::vector<float> left(4800, 0.0f), right(4800, 0.0f);
+                for (int done = 0; done < 4800; done += 256)
+                    m.Render(256 < 4800 - done ? 256 : 4800 - done, path, left.data() + done, right.data() + done);
+                double peak = 0.0;
+                for (std::size_t i = 0; i < left.size(); ++i)
+                    peak = std::fmax(peak, std::fmax(std::fabs(left[i]), std::fabs(right[i])));
+                Check(peak < 1.0e-6, std::string(setup.name) + " bias " + std::to_string(bias) + " path "
+                                         + std::to_string(static_cast<int>(path)) + ": " + std::to_string(peak)
+                                         + " out of a machine at rest");
+            }
 }
 
 } // namespace
@@ -625,6 +524,7 @@ int main() {
     TestLevels(*machine);
     TestNoise(*machine);
     TestStopAndRates(*machine);
+    TestRestAfterReset(*machine);
     if (failures == 0)
         std::printf("Reboot.Boards: all checks passed\n");
     return failures == 0 ? 0 : 1;

@@ -5,10 +5,11 @@
 // mapping from a normalised 0..1 position. Front ends store and automate the
 // normalised positions; the engine takes the values (Engine::SetControls).
 //
-// Ids and names are generic: the boards are the Handheld, the Console, the
-// PSG and the Micro, and the Console's cartridge chips are expansions A to E.
-// Never rename or reuse an id, and append new controls at the end: saved
-// sessions and Rack patches recall by them.
+// Ids and names are generic: the boards are the Handheld and the Console,
+// and the Console's cartridge chips are expansions A to E. Never rename or
+// reuse an id, and append new controls at the end: saved sessions and Rack
+// patches recall by them. (0.4.0 renumbered them all once, with the owner's
+// leave: no session or patch of 0.3.0 carries over.)
 
 #include <array>
 #include <cmath>
@@ -17,14 +18,26 @@
 namespace protocodus::reboot {
 
 enum Control : int {
-    // Layer A's machines; layer B's are the same seven at kBBoard.
-    kBoard,             // 0 Handheld, 1 Console, 2 PSG, 3 Micro
+    // The machines.
+    kBoard,             // 0 Handheld, 1 Console
     kRevision,          // the board's revision (README, How it works); past the board's last, its last
     kExpansion,         // the Console's cartridge chip: 0 none, then A to E
     kExpansionChannels, // how many channels expansion C runs, 1 to 8
     kBias,              // the Console's held DMC level, 0 to 127
     kPath,              // 0 Pin (the chips' DACs and mixer), 1 Line (the machine's output stage)
     kBoards,            // machines played at once, 1 to 8
+    // The voice.
+    kPart,              // which of the board's parts (Machine::PartOf), 0 to 4
+    kShape,             // the part's duty, wave or noise mode, 0 to 7
+    kLevel,             // the chip's volume steps, 0 to 15
+    kAttack,            // ms from silence to the level; under a frame, at once
+    kDecay,             // ms from the level down to the sustain level
+    kSustain,           // the held level, 0 to 15 of the level
+    kRelease,           // ms from where the key leaves it down to silence; under a frame, at once
+    kTranspose,         // semitones
+    kFine,              // cents
+    kMod,               // the expansion D wave's modulation depth, 0 to 63
+    // Playing.
     kMode,              // 0 Poly, 1 Mono, 2 Arp
     kArpRate,           // frames a step of the arpeggio holds
     kVibratoDepth,      // cents either way; the mod wheel adds up to 50 more
@@ -32,41 +45,17 @@ enum Control : int {
     kVibratoDelay,      // ms from a note's start before the vibrato begins
     kGlide,             // ms a Mono legato note takes to reach its pitch
     kBendRange,         // semitones the pitch wheel bends either way
-    kVelocity,          // 0 every note at its layer's level .. 1 level times velocity
-    kVolume,            // output level, dB: our trim after the machines (README, How it works)
-    kAOn, kAPart, kAShape, kALevel, kAAttack, kADecay, kASustain, kARelease, kATranspose, kAFine, kAMod,
-    kBOn, kBPart, kBShape, kBLevel, kBAttack, kBDecay, kBSustain, kBRelease, kBTranspose, kBFine, kBMod,
+    kVelocity,          // 0 every note at the level .. 1 level times velocity
+    // The output.
     kDouble,            // 0 one set of machines; 1 a second set too, the first left and the second right
     kDetune,            // cents between the two sets with Double, half of it either way
-    kBBoard, kBRevision, kBExpansion, kBExpansionChannels, kBBias, kBPath, kBBoards,
+    kVolume,            // output level, dB: our trim after the machines (README, How it works)
     kControlCount
 };
 
-// A layer's machines, as offsets from kBoard or kBBoard.
-enum MachineControl : int {
-    kMBoard, kMRevision, kMExpansion, kMExpansionChannels, kMBias, kMPath, kMBoards, kMachineControls
-};
-
-// A layer's controls, as offsets from kAOn or kBOn.
-enum LayerControl : int {
-    kOn,        // the layer plays
-    kPart,      // which of the board's parts (Machine::PartOf), 0 to 4
-    kShape,     // the part's duty, wave, noise mode or envelope shape, 0 to 7
-    kLevel,     // the chip's volume steps, 0 to 15
-    kAttack,    // frames a volume step takes on the way up; 0 starts at full
-    kDecay,     // frames a step takes down to the sustain level; 0 goes at once
-    kSustain,   // the held level, 0 to 15 of the level
-    kRelease,   // frames a step takes down after the key; 0 stops at once
-    kTranspose, // semitones
-    kFine,      // cents
-    kMod,       // the expansion D wave's modulation depth, 0 to 63
-    kLayerControls
-};
-constexpr int kLayers = 2;
-constexpr int kLayerBase[kLayers] = { kAOn, kBOn };
-constexpr int kMachineBase[kLayers] = { kBoard, kBBoard };
-
-enum class Curve { kLinear, kLog, kInteger, kStepped };
+// kCubic: value = min + (max - min) n^3, for times whose short end needs
+// the knob's travel.
+enum class Curve { kLinear, kLog, kInteger, kStepped, kCubic };
 
 struct ControlInfo {
     const char* id;    // stable parameter / property id
@@ -78,13 +67,23 @@ struct ControlInfo {
 };
 
 inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
-    { "board", "A Board", 0.0, 3.0, 0.0, 4, Curve::kStepped, "" },
-    { "revision", "A Revision", 0.0, 2.0, 0.0, 3, Curve::kStepped, "" },
-    { "expansion", "A Expansion", 0.0, 5.0, 0.0, 6, Curve::kStepped, "" },
-    { "expansion_channels", "A Expansion channels", 1.0, 8.0, 4.0, 8, Curve::kStepped, "" },
-    { "bias", "A Bias", 0.0, 127.0, 0.0, 0, Curve::kInteger, "" },
-    { "path", "A Path", 0.0, 1.0, 1.0, 2, Curve::kStepped, "" },
-    { "boards", "A Boards", 1.0, 8.0, 2.0, 8, Curve::kStepped, "" },
+    { "board", "Board", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
+    { "revision", "Revision", 0.0, 2.0, 0.0, 3, Curve::kStepped, "" },
+    { "expansion", "Expansion", 0.0, 5.0, 0.0, 6, Curve::kStepped, "" },
+    { "expansion_channels", "Expansion channels", 1.0, 8.0, 4.0, 8, Curve::kStepped, "" },
+    { "bias", "Bias", 0.0, 127.0, 0.0, 0, Curve::kInteger, "" },
+    { "path", "Path", 0.0, 1.0, 1.0, 2, Curve::kStepped, "" },
+    { "boards", "Boards", 1.0, 8.0, 2.0, 8, Curve::kStepped, "" },
+    { "part", "Part", 0.0, 4.0, 0.0, 5, Curve::kStepped, "" },
+    { "shape", "Shape", 0.0, 7.0, 2.0, 8, Curve::kStepped, "" },
+    { "level", "Level", 0.0, 15.0, 12.0, 0, Curve::kInteger, "" },
+    { "attack", "Attack", 0.0, 5000.0, 0.0, 0, Curve::kCubic, "ms" },
+    { "decay", "Decay", 0.0, 5000.0, 400.0, 0, Curve::kCubic, "ms" },
+    { "sustain", "Sustain", 0.0, 15.0, 10.0, 0, Curve::kInteger, "" },
+    { "release", "Release", 0.0, 5000.0, 250.0, 0, Curve::kCubic, "ms" },
+    { "transpose", "Transpose", -24.0, 24.0, 0.0, 0, Curve::kInteger, "semitones" },
+    { "fine", "Fine", -50.0, 50.0, 0.0, 0, Curve::kLinear, "cents" },
+    { "mod", "Mod", 0.0, 63.0, 0.0, 0, Curve::kInteger, "" },
     { "mode", "Mode", 0.0, 2.0, 0.0, 3, Curve::kStepped, "" },
     { "arp_rate", "Arp rate", 1.0, 8.0, 2.0, 0, Curve::kInteger, "frames" },
     { "vibrato_depth", "Vibrato", 0.0, 100.0, 0.0, 0, Curve::kLinear, "cents" },
@@ -93,38 +92,9 @@ inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "glide", "Glide", 0.0, 1000.0, 0.0, 0, Curve::kLinear, "ms" },
     { "bend_range", "Bend range", 0.0, 12.0, 2.0, 0, Curve::kInteger, "semitones" },
     { "velocity", "Velocity", 0.0, 1.0, 0.5, 0, Curve::kLinear, "" },
-    { "volume", "Volume", -24.0, 6.0, 0.0, 0, Curve::kLinear, "dB" },
-    { "a_on", "A On", 0.0, 1.0, 1.0, 2, Curve::kStepped, "" },
-    { "a_part", "A Part", 0.0, 4.0, 0.0, 5, Curve::kStepped, "" },
-    { "a_shape", "A Shape", 0.0, 7.0, 2.0, 8, Curve::kStepped, "" },
-    { "a_level", "A Level", 0.0, 15.0, 12.0, 0, Curve::kInteger, "" },
-    { "a_attack", "A Attack", 0.0, 30.0, 0.0, 0, Curve::kInteger, "frames" },
-    { "a_decay", "A Decay", 0.0, 30.0, 0.0, 0, Curve::kInteger, "frames" },
-    { "a_sustain", "A Sustain", 0.0, 15.0, 15.0, 0, Curve::kInteger, "" },
-    { "a_release", "A Release", 0.0, 30.0, 2.0, 0, Curve::kInteger, "frames" },
-    { "a_transpose", "A Transpose", -24.0, 24.0, 0.0, 0, Curve::kInteger, "semitones" },
-    { "a_fine", "A Fine", -50.0, 50.0, 0.0, 0, Curve::kLinear, "cents" },
-    { "a_mod", "A Mod", 0.0, 63.0, 0.0, 0, Curve::kInteger, "" },
-    { "b_on", "B On", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
-    { "b_part", "B Part", 0.0, 4.0, 0.0, 5, Curve::kStepped, "" },
-    { "b_shape", "B Shape", 0.0, 7.0, 2.0, 8, Curve::kStepped, "" },
-    { "b_level", "B Level", 0.0, 15.0, 12.0, 0, Curve::kInteger, "" },
-    { "b_attack", "B Attack", 0.0, 30.0, 0.0, 0, Curve::kInteger, "frames" },
-    { "b_decay", "B Decay", 0.0, 30.0, 0.0, 0, Curve::kInteger, "frames" },
-    { "b_sustain", "B Sustain", 0.0, 15.0, 15.0, 0, Curve::kInteger, "" },
-    { "b_release", "B Release", 0.0, 30.0, 2.0, 0, Curve::kInteger, "frames" },
-    { "b_transpose", "B Transpose", -24.0, 24.0, 0.0, 0, Curve::kInteger, "semitones" },
-    { "b_fine", "B Fine", -50.0, 50.0, 0.0, 0, Curve::kLinear, "cents" },
-    { "b_mod", "B Mod", 0.0, 63.0, 0.0, 0, Curve::kInteger, "" },
     { "double", "Double", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
     { "detune", "Detune", 0.0, 50.0, 8.0, 0, Curve::kLinear, "cents" },
-    { "b_board", "B Board", 0.0, 3.0, 0.0, 4, Curve::kStepped, "" },
-    { "b_revision", "B Revision", 0.0, 2.0, 0.0, 3, Curve::kStepped, "" },
-    { "b_expansion", "B Expansion", 0.0, 5.0, 0.0, 6, Curve::kStepped, "" },
-    { "b_expansion_channels", "B Expansion channels", 1.0, 8.0, 4.0, 8, Curve::kStepped, "" },
-    { "b_bias", "B Bias", 0.0, 127.0, 0.0, 0, Curve::kInteger, "" },
-    { "b_path", "B Path", 0.0, 1.0, 1.0, 2, Curve::kStepped, "" },
-    { "b_boards", "B Boards", 1.0, 8.0, 2.0, 8, Curve::kStepped, "" },
+    { "volume", "Volume", -24.0, 6.0, 0.0, 0, Curve::kLinear, "dB" },
 } };
 
 // The value of control `index` at normalised position n (clamped to 0..1).
@@ -136,6 +106,7 @@ inline double FromNormalized(int index, double n) {
     case Curve::kStepped: return c.min + std::floor(n * (c.steps - 1) + 0.5);
     case Curve::kInteger: return std::floor(c.min + (c.max - c.min) * n + 0.5);
     case Curve::kLog: return c.min * std::pow(c.max / c.min, n);
+    case Curve::kCubic: return c.min + (c.max - c.min) * n * n * n;
     case Curve::kLinear: break;
     }
     return c.min + (c.max - c.min) * n;
@@ -146,6 +117,8 @@ inline double ToNormalized(int index, double value) {
     value = value == value ? (value < c.min ? c.min : value > c.max ? c.max : value) : c.initial;
     if (c.curve == Curve::kLog)
         return std::log(value / c.min) / std::log(c.max / c.min);
+    if (c.curve == Curve::kCubic)
+        return std::cbrt((value - c.min) / (c.max - c.min));
     return (value - c.min) / (c.max - c.min);
 }
 

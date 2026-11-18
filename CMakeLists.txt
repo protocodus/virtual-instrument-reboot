@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Reboot VERSION 0.3.0 LANGUAGES CXX)
+project(Reboot VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,18 +37,16 @@ set(REBOOT_DSP_HEADERS
     Source/DSP/Boards/Board.h
     Source/DSP/Boards/Console.h
     Source/DSP/Boards/Handheld.h
-    Source/DSP/Boards/Micro.h
-    Source/DSP/Boards/Psg.h
     Source/DSP/Chips/Ay8910.h
-    Source/DSP/Chips/Beeper.h
     Source/DSP/Chips/Famicom.h
     Source/DSP/Chips/GameBoyApu.h
     Source/DSP/Chips/Lfsr.h
     Source/DSP/Chips/NesApu.h
-    Source/DSP/Chips/Sn76489.h
     Source/DSP/Chips/Timer.h
     Source/DSP/Driver/Machine.h
     Source/DSP/Driver/Waves.h
+    Source/DSP/LevelTrimData.h
+    Source/DSP/LevelTrims.h
     Source/DSP/OutputStage.h
     Source/DSP/RebootControls.h
     Source/DSP/RebootEngine.h
@@ -94,6 +92,11 @@ if(REBOOT_BUILD_TOOLS)
     target_include_directories(RenderRebootPresetDemos PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/Tools")
     target_link_libraries(RenderRebootPresetDemos PRIVATE RebootDSP Threads::Threads)
     target_compile_options(RenderRebootPresetDemos PRIVATE ${REBOOT_WARNINGS})
+
+    # The level trims, measured through the engine (Source/DSP/LevelTrims.h).
+    add_executable(RebootLevels Tools/RebootLevels.cpp)
+    target_link_libraries(RebootLevels PRIVATE RebootDSP)
+    target_compile_options(RebootLevels PRIVATE ${REBOOT_WARNINGS})
 endif()
 
 if(BUILD_TESTING)
@@ -200,6 +203,11 @@ if(BUILD_TESTING)
         add_test(NAME Reboot.AudioDemos
                  COMMAND RenderRebootPresetDemos --jobs 4 --check "${CMAKE_CURRENT_SOURCE_DIR}/Docs/audio/midi")
         set_tests_properties(Reboot.AudioDemos PROPERTIES TIMEOUT 600 LABELS audio)
+
+        # Every part and shape of every machine, on both paths, within
+        # 0.05 dB of the reference loudness: the trims are current.
+        add_test(NAME Reboot.Levels COMMAND RebootLevels --check)
+        set_tests_properties(Reboot.Levels PROPERTIES TIMEOUT 600 LABELS audio)
 
         # U7: the demos' realtime factor on one thread against the budget in
         # Tools/RenderPresetDemos.cpp. Timing means nothing in an unoptimised

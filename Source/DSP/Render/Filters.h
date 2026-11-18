@@ -42,6 +42,12 @@ public:
 
     void Reset() noexcept { x1_ = 0.0, y1_ = 0.0; }
 
+    // The state after `x` has stood at the input for ever.
+    void Settle(double x) noexcept {
+        x1_ = x;
+        y1_ = kind_ == Kind::HighPass ? 0.0 : x;
+    }
+
     double Process(double x) noexcept {
         const double y = b0_ * x + b1_ * x1_ - a1_ * y1_;
         x1_ = x;

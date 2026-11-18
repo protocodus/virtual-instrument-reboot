@@ -24,11 +24,8 @@ enum class Voice : std::uint8_t {
     Wave,      // a channel playing a wave from RAM
     ModWave,   // the disk unit's wave with its modulator
     Saw,       // the VRC6's accumulator
-    Tone,      // a square with no duty register (PSG, AY, 5B)
+    Tone,      // a square with no duty register (the 5B)
     Noise,
-    Bass,      // the PSG's periodic noise clocked by tone 3
-    Buzzer,    // the AY's envelope run as an oscillator
-    Beeper,    // a CPU-toggled bit
 };
 
 // A note's settings in the chip's own units. The playing layer computes
@@ -76,6 +73,9 @@ public:
     }
 
     void Read(int bus, float* out, int frames) noexcept { buses_[bus].Read(out, frames, 1.0); }
+
+    // Bus `bus`'s steps in flight landed at once; the level they leave.
+    double Land(int bus) noexcept { return buses_[bus].Land(); }
 
     [[nodiscard]] bool Settled() const noexcept {
         for (int s = 0; s < Sources; ++s)

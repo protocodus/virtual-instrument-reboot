@@ -141,14 +141,17 @@ double Measure(const std::vector<float>& x, double around, double rate, std::siz
 
 double Cents(double a, double b) { return 1200.0 * std::log2(a / b); }
 
-// The Init patch with a pin-path, full-level, unsensitive layer A.
+// The Init patch on the pin path at full level, unsensitive, its envelope
+// held open until the key's 250 ms release.
 Controls Plain(int board, int part = 0, int shape = 2) {
     Controls c;
     c[kBoard] = board;
     c[kPath] = 0;
-    c[kAPart] = part;
-    c[kAShape] = shape;
-    c[kALevel] = 15;
+    c[kPart] = part;
+    c[kShape] = shape;
+    c[kLevel] = 15;
+    c[kDecay] = 0;
+    c[kSustain] = 15;
     c[kVelocity] = 0;
     return c;
 }
@@ -213,16 +216,16 @@ void TestPresets() {
     }
 }
 
-// One channel at full volume, a 50 % square, reads -24 dBFS RMS on every
-// board, which the other levels are set against (RebootEngine.h).
+// One channel at full volume, a 50 % square, reads -24 dBFS RMS on both
+// boards, which the other parts are trimmed to (LevelTrims.h; every part
+// and shape is Reboot.Levels).
 void TestReferenceLevel() {
     struct Case {
         const char* name;
         int board;
         int part, shape;
     };
-    for (const Case& k : { Case { "handheld", 0, 0, 2 }, Case { "console", 1, 0, 2 }, Case { "psg", 2, 0, 0 },
-                           Case { "micro", 3, 0, 0 } }) {
+    for (const Case& k : { Case { "handheld", 0, 0, 2 }, Case { "console", 1, 0, 2 } }) {
         Controls c = Plain(k.board, k.part, k.shape);
         c[kBoards] = 1;
         const auto e = Fresh(c);
@@ -266,7 +269,7 @@ void TestRates() {
 // board's default patch, never folded into another octave. The chips'
 // period steps leave the top keys up to about 32 cents out (the AY's C8).
 void TestKeyboard() {
-    for (int board = 0; board < 4; ++board) {
+    for (int board = 0; board < 2; ++board) {
         for (int key = 21; key <= 108; ++key) {
             Controls c;
             c[kBoard] = board;
@@ -319,9 +322,9 @@ void TestOversampling() {
         Check(e->Oversampling() == expect, "oversampling " + std::to_string(factor) + " is not taken as " + std::to_string(expect));
     }
     // One preset of each board, and one doubled, cut into other blocks.
-    for (std::size_t p : { 0, 4, 9, 13 }) {
+    for (std::size_t p : { 0, 3, 4, 7 }) {
         Controls c = kPresets[p].ToControls();
-        if (p == 13)
+        if (p == 7)
             c[kDouble] = 1;
         const Audio a = Play(*Fresh(c, 48000.0, 8), Phrase(), 48000, 256);
         Check(Finite(a), std::string(kPresets[p].name) + " at 8x: not finite");
@@ -332,7 +335,7 @@ void TestOversampling() {
         }
     }
     // Every board keeps its keys in tune at 8x.
-    for (int board = 0; board < 4; ++board) {
+    for (int board = 0; board < 2; ++board) {
         for (int key = 21; key <= 108; key += 11) {
             Controls c;
             c[kBoard] = board;
@@ -350,7 +353,7 @@ void TestOversampling() {
 void TestDouble() {
     // With no detune each side is one set's own sound, bit for bit, on
     // every board, through bends, vibrato, the pedal and releases.
-    for (int board = 0; board < 4; ++board) {
+    for (int board = 0; board < 2; ++board) {
         Controls c;
         c[kBoard] = board;
         const Audio one = Play(*Fresh(c), Phrase(), 96000);
@@ -374,7 +377,7 @@ void TestDouble() {
     // Turned on under a held key, Double plays it on both sides; after the
     // key, both sides fall silent.
     Controls single = Plain(0);
-    single[kARelease] = 0;
+    single[kRelease] = 0;
     const auto e = Fresh(single);
     std::vector<float> l(48000), r(48000);
     const std::uint8_t on[] = { 0x90, 64, 100 }, off[] = { 0x80, 64, 0 };
@@ -408,58 +411,7 @@ void TestVoices() {
     {
         const auto e = Fresh(Plain(0));
         Play(*e, { On(0, 30) }, 2000);
-        Check(e->Sounding() == 1 && e->MachineAt(0, 0).HandheldBoard().Chip().DacOn(2), "the low key does not go to the wave channel");
-    }
-    // The PSG's bass takes tone 3 as well, so with one machine a bass and
-    // two tones fill it and a third tone steals.
-    {
-        Controls c = Plain(2, 0, 0);
-        c[kBoards] = 1;
-        const auto e = Fresh(c);
-        Play(*e, { On(0, 30), On(10, 72), On(20, 76) }, 2000);
-        Check(e->Sounding() == 3, "psg: bass and two tones are not three notes");
-        const psg::Chip& chip = e->MachineAt(0, 0).PsgBoard().Chip();
-        Check(chip.Attenuation(2) == 15 && chip.Attenuation(3) < 15, "psg: the bass does not hold tone 3 silent");
-        Play(*e, { On(0, 79) }, 2000);
-        Check(e->Sounding() == 3, "psg: a fourth note does not steal");
-    }
-    // A layer B an octave up doubles every note.
-    {
-        Controls c = Plain(1);
-        c[kBOn] = 1;
-        c[kBBoard] = 1;
-        c[kBPart] = 1;
-        c[kBTranspose] = 12;
-        const auto e = Fresh(c);
-        Play(*e, { On(0, 60), On(0, 64) }, 2000);
-        Check(e->Sounding() == 4, "two layers do not double the notes");
-    }
-    // Each layer plays its own machines: a handheld under a PSG, each note
-    // on both, and B's machine count its own.
-    {
-        Controls c = Plain(0);
-        c[kBOn] = 1;
-        c[kBBoard] = 2;
-        c[kBBoards] = 1;
-        const auto e = Fresh(c);
-        Play(*e, { On(0, 60), On(0, 64), On(0, 67), On(0, 71) }, 2000);
-        Check(e->MachineAt(0, 0).Kind() == BoardKind::Handheld && e->MachineAt(1, 0).Kind() == BoardKind::Psg,
-              "the layers do not play their own boards");
-        Check(e->Boards(0) == 2 && e->Boards(1) == 1, "the layers do not keep their own machine counts");
-        // Two handhelds' four pulses hold the four keys; one PSG's three tones
-        // hold three.
-        Check(e->Sounding() == 7, "two layers on their own machines: " + std::to_string(e->Sounding()) + " notes, not 7");
-    }
-    // A layer that is off runs no machines: its settings change nothing.
-    {
-        Controls c = Plain(1);
-        const std::vector<Event> ev { On(0, 60), On(4800, 67), Off(24000, 60) };
-        const Audio a = Play(*Fresh(c), ev, 48000);
-        c[kBBoard] = 3;
-        c[kBBoards] = 8;
-        c[kBPath] = 0;
-        const Audio b = Play(*Fresh(c), ev, 48000);
-        Check(a.left == b.left && a.right == b.right, "layer B's machines are heard while it is off");
+        Check(e->Sounding() == 1 && e->MachineAt(0).HandheldBoard().Chip().DacOn(2), "the low key does not go to the wave channel");
     }
 }
 
@@ -511,7 +463,7 @@ void TestModes() {
 
 void TestPedalAndPanic() {
     Controls c = Plain(0);
-    c[kARelease] = 0;
+    c[kRelease] = 0;
     {
         const auto e = Fresh(c);
         const Audio a = Play(*e, { On(0, 69), Cc(100, 64, 127), Off(200, 69) }, 48000);
@@ -526,9 +478,8 @@ void TestPedalAndPanic() {
         Check(e->Sounding() == 1, "a re-struck key under the pedal is " + std::to_string(e->Sounding()) + " notes");
     }
     for (int cc : { 120, 123 }) {
-        // Two frames a step: 15 steps take half a second.
         Controls slow = Plain(0);
-        slow[kARelease] = 2;
+        slow[kRelease] = 500;
         const auto e = Fresh(slow);
         Play(*e, { On(0, 60), On(0, 64), Cc(10, 64, 127) }, 4800);
         const Audio a = Play(*e, { Cc(0, cc, 0) }, 48000);
@@ -545,10 +496,10 @@ void TestPedalAndPanic() {
 // filters and the output stage's look-ahead at rest. One preset of each
 // board, one doubled, at 1x and 4x.
 void TestReset() {
-    for (std::size_t p : { 0, 4, 9, 13 }) {
+    for (std::size_t p : { 0, 3, 4, 7 }) {
         for (int factor : { 1, 4 }) {
             Controls c = kPresets[p].ToControls();
-            if (p == 13)
+            if (p == 7)
                 c[kDouble] = 1;
             const auto e = Fresh(c, 48000.0, factor);
             Play(*e, { On(0, 60), On(0, 67), Cc(10, 64, 127), Off(20, 60), Bend(30, 0.0) }, 9000);
@@ -574,13 +525,17 @@ double AcRms(const std::vector<float>& x, std::size_t from, std::size_t to) {
     return std::sqrt(sum / static_cast<double>(to - from));
 }
 
-// The envelope moves the chip's volume one step every so many frames, and
-// the handheld's DAC is linear, so the level is the step over 15. A frame
-// is 70224 cycles at 4194304 Hz, 803.65 samples; frame k's tick lands
-// 112 samples late (the engine's latency). Windows are whole A4 periods.
+// The envelope moves the volume at the rate that takes each stage its time
+// and writes the chip the whole step it has reached, once a frame; the
+// handheld's DAC is linear, so the level is the step over 15. A frame is
+// 70224 cycles at 4194304 Hz, 803.65 samples; frame k's tick lands 112
+// samples late (the engine's latency). Windows are whole A4 periods inside
+// one frame. Each time here is a whole number of frames, so every frame's
+// step is exact.
 void TestEnvelope() {
     constexpr double kFrame = 70224.0 / 4194304.0 * 48000.0;
     constexpr double kPeriod = 48000.0 * 298.0 / 131072.0;
+    const auto ms = [](double frames) { return frames * 70224.0 / 4194304.0 * 1000.0; };
     const auto window = [&](double fromFrame, int periods) {
         const auto from = static_cast<std::size_t>(fromFrame * kFrame + 112.0 + 150.0);
         return std::make_pair(from, from + static_cast<std::size_t>(periods * kPeriod));
@@ -589,48 +544,76 @@ void TestEnvelope() {
     const Audio full = Play(*Fresh(Plain(0)), { On(0, 69) }, 48000);
     const double reference = level(full, window(40.0, 40));
 
-    // Attack 2: step k from frame 2k, full from frame 30.
+    // Attack over 30 frames: step round(k / 2) at frame k, full from 30.
     {
         Controls c = Plain(0);
-        c[kAAttack] = 2;
+        c[kAttack] = ms(30.0);
         const Audio a = Play(*Fresh(c), { On(0, 69) }, 48000);
-        Check(std::fabs(Db(level(a, window(14.0, 10)) / reference) - Db(7.0 / 15.0)) < 0.5, "attack: step 7 is not at frame 14");
-        Check(std::fabs(Db(level(a, window(30.0, 40)) / reference)) < 0.2, "attack: not full from frame 30");
+        Check(std::fabs(Db(level(a, window(14.0, 5)) / reference) - Db(7.0 / 15.0)) < 0.5, "attack: step 7 is not at frame 14");
+        Check(std::fabs(Db(level(a, window(31.0, 40)) / reference)) < 0.2, "attack: not full from frame 30");
     }
-    // Decay 3 to sustain 5: step 15 - k from frame 3k, then 5 held.
+    // Decay over 30 frames to sustain 5: step 15 - k / 3 at frame k, then 5
+    // held.
     {
         Controls c = Plain(0);
-        c[kADecay] = 3;
-        c[kASustain] = 5;
+        c[kDecay] = ms(30.0);
+        c[kSustain] = 5;
         const Audio a = Play(*Fresh(c), { On(0, 69) }, 48000);
-        Check(std::fabs(Db(level(a, window(15.0, 15)) / reference) - Db(10.0 / 15.0)) < 0.5, "decay: step 10 is not at frame 15");
+        Check(std::fabs(Db(level(a, window(15.0, 5)) / reference) - Db(10.0 / 15.0)) < 0.5, "decay: step 10 is not at frame 15");
         Check(std::fabs(Db(level(a, window(40.0, 40)) / reference) - Db(5.0 / 15.0)) < 0.2, "decay: the sustain level does not hold");
+    }
+    // A time under a frame is no time: full at once.
+    {
+        Controls c = Plain(0);
+        c[kAttack] = ms(0.9);
+        const Audio a = Play(*Fresh(c), { On(0, 69) }, 48000);
+        Check(std::fabs(Db(level(a, window(0.0, 5)) / reference)) < 0.2, "attack: under a frame is not at once");
     }
     // Sustain moved to 0 and back while the key holds: the note follows.
     {
         Controls c = Plain(0);
         const auto e = Fresh(c);
         Play(*e, { On(0, 69) }, 12000);
-        c[kASustain] = 0;
+        c[kSustain] = 0;
         e->SetControls(c);
         const Audio quiet = Play(*e, {}, 12000);
-        c[kASustain] = 15;
+        c[kSustain] = 15;
         e->SetControls(c);
         const Audio back = Play(*e, {}, 24000);
         // The level moves on the next frame, up to one after the change.
         Check(Settles(quiet.left, kLate + 804) && std::fabs(Db(level(back, { 12000, 24000 }) / reference)) < 0.2,
               "sustain: a held note does not come back from sustain 0");
     }
-    // Release 4 from the key at sample 24000, inside frame 29: step 15 - k
-    // from frame 29 + 4k, silent from frame 89.
+    // Release over 60 frames from the key at sample 24000, inside frame 29:
+    // step 15 - j / 4 at frame 29 + j, silent from frame 89.
     {
         Controls c = Plain(0);
-        c[kARelease] = 4;
+        c[kRelease] = ms(60.0);
         const auto e = Fresh(c);
         const Audio a = Play(*e, { On(0, 69), Off(24000, 69) }, 72000);
-        Check(std::fabs(Db(level(a, window(49.0, 25)) / reference) - Db(10.0 / 15.0)) < 0.5, "release: step 10 is not at frame 49");
+        Check(std::fabs(Db(level(a, window(49.0, 5)) / reference) - Db(10.0 / 15.0)) < 0.5, "release: step 10 is not at frame 49");
         Play(*e, {}, 2400);
         Check(e->Sounding() == 0, "release: the note outlives its last step");
+    }
+    // Each step of the arpeggio starts the envelope again: a decay over six
+    // frames to sustain 0 falls from 15 to step 3 inside every six-frame
+    // step and is back at 15 on the next.
+    {
+        Controls c = Plain(0);
+        c[kMode] = 2;
+        c[kArpRate] = 6;
+        c[kDecay] = ms(6.0);
+        c[kSustain] = 0;
+        const Audio a = Play(*Fresh(c), { On(0, 60), On(0, 64), On(0, 67) }, 48000);
+        for (int i = 2; i < 6; ++i) {
+            const auto start = static_cast<std::size_t>(6.0 * i * kFrame + 112.0);
+            const double early = AcRms(a.left, start + 100, start + 700);
+            const double late = AcRms(a.left, start + static_cast<std::size_t>(5.0 * kFrame) + 100,
+                                      start + static_cast<std::size_t>(5.0 * kFrame) + 700);
+            Check(early > 0.8 * reference && late < 0.3 * reference,
+                  "arp: step " + std::to_string(i) + " does not start the envelope again (" + std::to_string(early / reference)
+                      + ", " + std::to_string(late / reference) + ")");
+        }
     }
 }
 
@@ -645,7 +628,7 @@ void TestHeldWaves() {
         c[kRevision] = u.revision;
         c[kExpansion] = u.expansion;
         Controls changed = c;
-        changed[kAShape] = 5;
+        changed[kShape] = 5;
         const Audio r = Play(*Fresh(c), { On(0, 69) }, 48000);
         const Audio t = Play(*Fresh(changed), { On(0, 69) }, 48000);
         const auto e = Fresh(c);
@@ -708,7 +691,7 @@ void TestTouch() {
 
 void TestBounds() {
     // Every board at its loudest: eight machines, every channel, held.
-    for (int board = 0; board < 4; ++board) {
+    for (int board = 0; board < 2; ++board) {
         Controls c = Plain(board);
         c[kBoards] = 8;
         c[kVolume] = 6;
@@ -748,7 +731,7 @@ void TestBounds() {
         Controls c = Plain(0);
         const auto e = Fresh(c);
         Play(*e, { On(0, 60), On(0, 67) }, 4800);
-        for (int board : { 1, 2, 3, 0 }) {
+        for (int board : { 1, 0 }) {
             c[kBoard] = board;
             e->SetControls(c);
             const Audio a = Play(*e, {}, 9600);

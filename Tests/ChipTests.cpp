@@ -4,11 +4,9 @@
 // again against one that was followed all along.
 
 #include "DSP/Chips/Ay8910.h"
-#include "DSP/Chips/Beeper.h"
 #include "DSP/Chips/Famicom.h"
 #include "DSP/Chips/GameBoyApu.h"
 #include "DSP/Chips/NesApu.h"
-#include "DSP/Chips/Sn76489.h"
 
 #include <algorithm>
 #include <cmath>
@@ -44,11 +42,8 @@ struct Register {
 };
 
 // Periods: NESdev APU Noise (32767, and 93 from the power-on seed of 1 in
-// mode 1); Pan Docs (15 and 7 bits: 32767 and 127); SMS Power SN76489 (the
-// "periodic" mode replays the 16- or 15-bit register; white noise is the
-// 16-bit register tapped at bits 0 and 3, whose cycle is 57337, or the
-// 15-bit one at bits 0 and 1, a maximal 32767); the AY's 17 bits at bits 0
-// and 3, a maximal 131071. The Game Boy register is stepped from 0, its
+// mode 1); Pan Docs (15 and 7 bits: 32767 and 127); the AY's (and so the
+// 5B's) 17 bits at bits 0 and 3, a maximal 131071. The Game Boy register is stepped from 0, its
 // reset state; its fifteenth bit holds the last output, so it is on its
 // cycle after one step, and short mode's upper bits after eight more.
 const std::vector<Register>& Registers() {
@@ -57,10 +52,6 @@ const std::vector<Register>& Registers() {
         { "gb short", gb::NoiseStepShort, &gb::kNoiseJump[1], 0, 16, 127 },
         { "nes long", nes::NoiseStepLong, &nes::kNoiseJump[0], 1, 0, 32767 },
         { "nes short", nes::NoiseStepShort, &nes::kNoiseJump[1], 1, 0, 93 },
-        { "sega periodic", psg::SegaPeriodic, &psg::kJump[0][0], 0x8000, 0, 16 },
-        { "sega white", psg::SegaWhite, &psg::kJump[0][1], 0x8000, 0, 57337 },
-        { "ti periodic", psg::TiPeriodic, &psg::kJump[1][0], 0x4000, 0, 15 },
-        { "ti white", psg::TiWhite, &psg::kJump[1][1], 0x4000, 0, 32767 },
         { "ay", ay::NoiseStep, &ay::kNoiseJump, 1, 0, 131071 },
     };
     return list;
@@ -467,72 +458,7 @@ void TestNes() {
 }
 
 // ---------------------------------------------------------------------------
-// SN76489, both variants.
-
-Snapshot PsgRead(const psg::Chip& c) {
-    return { c.Out(0), c.Out(1), c.Out(2), c.Out(3), c.Attenuation(0), c.Attenuation(1), c.Attenuation(2), c.Attenuation(3) };
-}
-
-std::vector<Step<psg::Chip>> PsgScript(bool lazy, std::int64_t heard, bool toneNoise) {
-    using C = psg::Chip;
-    using T = Trace<C>;
-    std::vector<Step<C>> s;
-    s.push_back(At<C>(3, [lazy, toneNoise](C& c, T& t) {
-        c.Write(0x8D, t), c.Write(0x0F, t);      // tone 1: 0x0FD
-        c.Write(0xA3, t), c.Write(0x05, t);      // tone 2: 0x053
-        c.Write(0xC1, t), c.Write(0x1E, t);      // tone 3: 0x1E1
-        c.Write(0xE0 | (toneNoise ? 7 : 4), t);  // white, rate 0 or tone 3
-        c.Write(0x90 | (lazy ? 15 : 0), t);
-        c.Write(0xB0 | (lazy ? 15 : 2), t);
-        c.Write(0xD0 | (lazy ? 15 : 4), t);
-        c.Write(0xF0 | (lazy ? 15 : 1), t);
-    }));
-    s.push_back(At<C>(heard, [](C& c, T& t) {
-        c.Write(0x90, t);
-        c.Write(0xB2, t);
-        c.Write(0xD4, t);
-        c.Write(0xF1, t);
-    }));
-    s.push_back(At<C>(heard + 100003, [](C& c, T& t) { c.Write(0xC9, t), c.Write(0x02, t); }));
-    return s;
-}
-
-void TestPsg() {
-    for (psg::Variant v : { psg::Variant::Sega, psg::Variant::Ti }) {
-        psg::Chip chip;
-        chip.Reset(v);
-        const char* name = v == psg::Variant::Sega ? "sega psg" : "ti psg";
-        const std::int64_t heard = 765432, end = 1400000;
-        for (bool toneNoise : { false, true }) {
-            CheckPartitions(name, chip, PsgRead, PsgScript(false, heard, toneNoise), end);
-            CheckPartitions(name, chip, PsgRead, PsgScript(true, heard, toneNoise), end);
-            CheckCatchUp(name, chip, PsgRead, PsgScript(false, heard, toneNoise), PsgScript(true, heard, toneNoise),
-                         heard, 0, end);
-        }
-
-        // SMS Power: a tone toggles every 16 N master cycles. MAME: a period
-        // of 0 counts as 1 on the Sega part and 0x400 on the TI part.
-        for (int n : { 0, 1, 0x0FE, 0x3FF }) {
-            std::vector<Step<psg::Chip>> s;
-            s.push_back(At<psg::Chip>(0, [n](psg::Chip& c, Trace<psg::Chip>& t) {
-                c.Write(static_cast<std::uint8_t>(0x80 | (n & 15)), t);
-                c.Write(static_cast<std::uint8_t>(n >> 4), t);
-                c.Write(0x90, t);
-            }));
-            const std::int64_t want = 16 * (n != 0 ? n : (v == psg::Variant::Sega ? 1 : 0x400));
-            const Trace<psg::Chip> t = Play(chip, PsgRead, s, want * 40, want * 40 + 1);
-            std::vector<std::int64_t> flips;
-            for (std::size_t i = 1; i < t.events.size(); ++i)
-                if (t.events[i].second[0] != t.events[i - 1].second[0])
-                    flips.push_back(t.events[i].first);
-            Check(flips.size() > 10 && flips[10] - flips[9] == want && flips[5] - flips[4] == want,
-                  std::string(name) + ": tone " + std::to_string(n) + " does not toggle every " + std::to_string(want));
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AY-3-8910.
+// AY-3-8910, the 5B's core.
 
 Snapshot AyRead(const ay::Chip& c) { return { c.Out(0), c.Out(1), c.Out(2) }; }
 
@@ -833,36 +759,14 @@ void TestCartridges() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The beeper.
-
-void TestBeeper() {
-    // The BEEPER loop's half cycle, from its instruction timings
-    // (Chips/Beeper.h): 118 T-states and 4 a count of HL.
-    Check(zx::BeeperHalfPeriod(0) == 118, "the BEEPER loop's fixed cost is 118 T-states");
-
-    // Only EAR and MIC reach the pin, and an unchanged pin is no event.
-    zx::Beeper b;
-    b.Reset();
-    int events = 0;
-    auto sink = [&](std::int64_t) { ++events; };
-    b.Write(0x08, sink);
-    b.Write(0x0F, sink);
-    b.Write(0x18, sink);
-    b.Write(0xE8, sink);
-    Check(events == 2 && b.Out() == 1, "the beeper reacts to bits other than EAR and MIC");
-}
-
 } // namespace
 
 int main() {
     TestNoiseRegisters();
     TestGameBoy();
     TestNes();
-    TestPsg();
     TestAy();
     TestCartridges();
-    TestBeeper();
     if (failures == 0)
         std::printf("Reboot.Chips: all checks passed\n");
     return failures == 0 ? 0 : 1;

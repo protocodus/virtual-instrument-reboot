@@ -89,17 +89,13 @@ public:
     Limits LimitsFor(const Case& c) const override {
         Limits limits;
         limits.ceiling = protocodus::OutputStage<2>::kCeiling + 1.0e-6f;
-        // The longest release either patch takes, 15 steps at the slowest
-        // frame (the PAL console's 50 Hz), and a margin.
-        int release = 0;
+        // The longest release either patch takes, and a margin.
+        double release = 0.0;
         for (const auto* values : { &c.values, &c.base }) {
-            const Controls controls = ToControls(*values);
-            for (int l = 0; l < kLayers; ++l) {
-                const int r = static_cast<int>(controls[kLayerBase[l] + kRelease] + 0.5);
-                release = r > release ? r : release;
-            }
+            const double r = ToControls(*values)[kRelease];
+            release = r > release ? r : release;
         }
-        const double seconds = release * 15.0 / 50.0 + 0.5;
+        const double seconds = release / 1000.0 + 0.5;
         limits.releaseSeconds = seconds > 2.0 ? seconds : 2.0;
         // The ramp lands back on the case's values before the held window
         // ends, so those decide whether the held chord must be heard.
@@ -113,51 +109,54 @@ public:
             for (const auto& s : settings)
                 rule.with.push_back({ static_cast<std::size_t>(s.first), Normalised(s.first, s.second) });
         };
-        const int control = static_cast<int>(index);
-        const bool layered = control >= kAOn && control <= kBMod;
-        const bool machined = control <= kBoards || control >= kBBoard;
-        const int layer = (layered && control >= kBOn) || control >= kBBoard ? 1 : 0;
-        const int base = kLayerBase[layer], m = kMachineBase[layer];
-        // Layer B is heard alone: on its own machines at A's pitch, it would
-        // sum with A by the phases the playing left between them.
-        if (layer == 1 && control != kBOn)
-            with({ { kBOn, 1 }, { kAOn, 0 } });
-        if (machined) {
-            switch (control - m) {
-            case kMExpansion:
-                // A cartridge chip sounds only on the Famicom's slot, through
-                // its own part.
-                with({ { m + kMBoard, 1 }, { m + kMRevision, 1 }, { base + kPart, 3 } });
-                break;
-            case kMExpansionChannels:
-                with({ { m + kMBoard, 1 }, { m + kMRevision, 1 }, { m + kMExpansion, 3 }, { base + kPart, 3 } });
-                break;
-            case kMBias:
-                // The DMC's level moves the triangle through the mixer.
-                with({ { m + kMBoard, 1 }, { base + kPart, 1 } });
-                break;
-            case kMPath:
-                // The handheld original's 28 Hz corner is all but the Pin
-                // blocker's on a chord from G3 up; the console's line stage
-                // is not.
-                with({ { m + kMBoard, 1 } });
-                break;
-            case kMBoards:
-                // One wave channel a machine, so every count changes how
-                // many of a three-note chord sound.
-                with({ { base + kPart, 1 } });
-                break;
-            default:
-                break;
-            }
-        }
-        switch (control) {
-        case kBOn:
-            // B doubles A at the same pitch on machines of its own, which
-            // start when B comes on, and a trigger leaves a pulse's duty step
-            // where it was (Pan Docs), so the doubled level rests on the
-            // phases between the two sets of machines.
-            rule.history = "the two layers' machines keep the duty phases they started with";
+        switch (static_cast<int>(index)) {
+        case kExpansion:
+            // A cartridge chip sounds only on the Famicom's slot, through
+            // its own part.
+            with({ { kBoard, 1 }, { kRevision, 1 }, { kPart, 3 } });
+            break;
+        case kExpansionChannels:
+            // On one machine the count is how many of the chord's notes the
+            // chip holds. Between counts that hold them all, the level trims
+            // leave the same loudness (LevelTrims.h) and what differs is the
+            // multiplex, which each channel joins at its own place: the
+            // replay after the reset puts the probes' notes on other
+            // channels than T's playing does.
+            with({ { kBoard, 1 }, { kRevision, 1 }, { kExpansion, 3 }, { kPart, 3 }, { kBoards, 1 } });
+            rule.history = "which of the multiplexed channels each note takes follows the order the playing freed them";
+            break;
+        case kBias:
+            // The DMC's level moves the triangle through the mixer.
+            with({ { kBoard, 1 }, { kPart, 1 } });
+            break;
+        case kPath:
+            // The handheld original's 28 Hz corner is all but the Pin
+            // blocker's on a chord from G3 up; the console's line stage is
+            // not.
+            with({ { kBoard, 1 } });
+            break;
+        case kBoards:
+            // One wave channel a machine, so every count changes how many of
+            // a three-note chord sound.
+            with({ { kPart, 1 } });
+            break;
+        case kShape:
+            // The pulse has four duties, so 6 plays as the base's 2; the wave
+            // part's eight waves tell every value apart.
+            if (static_cast<int>(FromNormalized(static_cast<int>(index), value) + 0.5) % 4 == 2)
+                with({ { kPart, 1 } });
+            break;
+        case kAttack:
+            rule.reach = Reach::NewNotes;
+            rule.reason = "the attack climbs from each note's start, so held notes are at their peak";
+            break;
+        case kDecay:
+            with({ { kSustain, 5 } });
+            rule.reach = Reach::NewNotes;
+            rule.reason = "the decay falls from each note's peak, which held notes have passed";
+            break;
+        case kMod:
+            with({ { kBoard, 1 }, { kRevision, 1 }, { kExpansion, 4 }, { kPart, 3 } });
             break;
         case kArpRate:
             with({ { kMode, 2 } });
@@ -194,30 +193,6 @@ public:
         default:
             break;
         }
-        if (layered) {
-            switch (control - base) {
-            case kAttack:
-                rule.reach = Reach::NewNotes;
-                rule.reason = "the attack climbs from each note's start, so held notes are at their peak";
-                break;
-            case kDecay:
-                with({ { base + kSustain, 5 } });
-                rule.reach = Reach::NewNotes;
-                rule.reason = "the decay falls from each note's peak, which held notes have passed";
-                break;
-            case kMod:
-                with({ { m + kMBoard, 1 }, { m + kMRevision, 1 }, { m + kMExpansion, 4 }, { base + kPart, 3 } });
-                break;
-            case kShape:
-                // The pulse has four duties, so 6 plays as the base's 2; the
-                // wave part's eight waves tell every value apart.
-                if (static_cast<int>(FromNormalized(control, value) + 0.5) % 4 == 2)
-                    with({ { base + kPart, 1 } });
-                break;
-            default:
-                break;
-            }
-        }
         return rule;
     }
 
@@ -229,32 +204,20 @@ private:
         return c;
     }
 
-    // Whether the matrix's held chord must be heard on a patch: some layer
-    // on a part its board has, loud enough to stay above -60 dBFS on the
-    // quietest DAC (the AY's, 3 dB a step), starting at full.
+    // Whether the matrix's held chord must be heard on a patch: a part its
+    // board has, loud enough to stay above -60 dBFS on the quietest DAC
+    // (the 5B's, 3 dB a step), at full from the start.
     static bool Sounds(const Controls& c) {
         if (c[kVolume] < -12.0)
             return false;
         const int board = static_cast<int>(c[kBoard] + 0.5);
         const int revision = static_cast<int>(c[kRevision] + 0.5);
         const int expansion = static_cast<int>(c[kExpansion] + 0.5);
-        for (int l = 0; l < kLayers; ++l) {
-            const int base = kLayerBase[l];
-            const int part = static_cast<int>(c[base + kPart] + 0.5);
-            bool exists;
-            switch (board) {
-            case 0: exists = part < 3; break;
-            case 1:
-                exists = part < 3 || (revision == 1 && ((part == 3 && expansion != 0) || (part == 4 && expansion == 1)));
-                break;
-            case 2: exists = part < 2; break;
-            default: exists = revision == 0 ? part < 4 : part == 3; break;
-            }
-            if (c[base + kOn] >= 0.5 && exists && c[base + kAttack] < 0.5 && c[base + kLevel] >= 12.0
-                && c[base + kSustain] >= 10.0)
-                return true;
-        }
-        return false;
+        const int part = static_cast<int>(c[kPart] + 0.5);
+        const bool exists = board == 0
+            ? part < 3
+            : part < 3 || (revision == 1 && ((part == 3 && expansion != 0) || (part == 4 && expansion == 1)));
+        return exists && c[kAttack] < 10.0 && c[kLevel] >= 12.0 && c[kSustain] >= 10.0;
     }
 
     void Apply() {

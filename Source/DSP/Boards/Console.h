@@ -175,6 +175,21 @@ public:
         default:
             break;
         }
+
+        // Ours: a machine chosen is heard as one that has stood at rest, its
+        // output stages settled on the level the writes above leave (the
+        // triangle held on its first step, the DMC on Bias), not as one
+        // switched on that moment, whose step from nothing would thump
+        // through the Pin blocker on every reset.
+        const double apu = mix_.Land(0), other = mix_.Land(1);
+        fdsLowPass_.Settle(other);
+        pinBlocker_.Settle(apu + other);
+        mmc5Board_.Settle(apu);
+        s5bApuIn_.Settle(apu);
+        s5bInternal_.Settle(other);
+        s5bOut_.Settle(0.0);
+        highPass_.Settle(cartridge_ == kMmc5 || cartridge_ == k5B ? 0.0 : apu + other);
+        lowPass_.Settle(0.0);
     }
 
     [[nodiscard]] int Channels() const noexcept {

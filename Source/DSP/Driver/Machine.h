@@ -7,19 +7,16 @@
 // A part is what a layer plays: a run of the board's channels and the voice
 // it plays on them. Keys a part cannot reach go to its board's fallback part
 // (ours, README How it works): the handheld's wave channel below the
-// pulses' 64 Hz, the console's triangle below the pulses' 54.6 Hz, the PSG's
-// periodic-noise bass below its tones' 109 Hz.
+// pulses' 64 Hz, the console's triangle below the pulses' 54.6 Hz.
 
 #include "../Boards/Console.h"
 #include "../Boards/Handheld.h"
-#include "../Boards/Micro.h"
-#include "../Boards/Psg.h"
 
 #include <cstdint>
 
 namespace protocodus::reboot {
 
-enum class BoardKind : int { Handheld, Console, Psg, Micro, Count };
+enum class BoardKind : int { Handheld, Console, Count };
 
 struct MachineSettings {
     BoardKind board = BoardKind::Handheld;
@@ -43,24 +40,30 @@ public:
     void Prepare(int sampleRate) {
         handheld_.Prepare(sampleRate);
         console_.Prepare(sampleRate);
-        psg_.Prepare(sampleRate);
-        micro_.Prepare(sampleRate);
     }
 
     void Reset(const MachineSettings& s) {
         kind_ = s.board;
-        revision_ = s.revision;
+        settings_ = s;
         switch (kind_) {
-        case BoardKind::Handheld: handheld_.Reset(Clamp(s.revision, Handheld::kRevisions)); break;
-        case BoardKind::Console:
-            console_.Reset(Clamp(s.revision, Console::kRevisions), s.expansion, s.expansionChannels, s.bias);
+        case BoardKind::Handheld:
+            settings_.revision = Clamp(s.revision, Handheld::kRevisions);
+            handheld_.Reset(settings_.revision);
+            settings_.expansion = Console::kNone;
             break;
-        case BoardKind::Psg: psg_.Reset(Clamp(s.revision, Psg::kRevisions)); break;
-        default: micro_.Reset(Clamp(s.revision, Micro::kRevisions)); break;
+        default:
+            settings_.revision = Clamp(s.revision, Console::kRevisions);
+            console_.Reset(settings_.revision, s.expansion, s.expansionChannels, s.bias);
+            settings_.expansion = console_.CartridgeType();
+            break;
         }
+        settings_.expansionChannels = s.expansionChannels < 1 ? 1 : s.expansionChannels > 8 ? 8 : s.expansionChannels;
     }
 
     [[nodiscard]] BoardKind Kind() const noexcept { return kind_; }
+    // What it was reset with, as it runs: the revision within the board's,
+    // the expansion none without a cartridge slot.
+    [[nodiscard]] const MachineSettings& Settings() const noexcept { return settings_; }
 
     // The parts each board offers, in the Part control's order.
     [[nodiscard]] Part PartOf(int index) const noexcept {
@@ -69,7 +72,7 @@ public:
             static constexpr Part kHandheld[] = { { 0, 2, Voice::Pulse }, { 2, 1, Voice::Wave }, { 3, 1, Voice::Noise } };
             return index < 3 ? kHandheld[index] : Part {};
         }
-        case BoardKind::Console:
+        default:
             switch (index) {
             case 0: return { 0, 2, Voice::Pulse };
             case 1: return { 2, 1, Voice::Triangle };
@@ -90,16 +93,6 @@ public:
                 return {};
             default: return {};
             }
-        case BoardKind::Psg: {
-            static constexpr Part kPsg[] = { { 0, 3, Voice::Tone }, { 3, 1, Voice::Noise } };
-            return index < 2 ? kPsg[index] : Part {};
-        }
-        default:
-            if (index == 3)
-                return { Micro::kBeeper, 1, Voice::Beeper };
-            if (index > 3 || !micro_.HasAy())
-                return {};
-            return { 0, 3, index == 0 ? Voice::Tone : index == 1 ? Voice::Noise : Voice::Buzzer };
         }
     }
 
@@ -108,19 +101,9 @@ public:
         switch (kind_) {
         case BoardKind::Handheld:
             return part.voice == Voice::Pulse ? Part { 2, 1, Voice::Wave } : Part {};
-        case BoardKind::Console:
-            return part.voice != Voice::Noise && part.voice != Voice::Triangle ? Part { 2, 1, Voice::Triangle } : Part {};
-        case BoardKind::Psg:
-            return part.voice == Voice::Tone ? Part { 3, 1, Voice::Bass } : Part {};
         default:
-            return {};
+            return part.voice != Voice::Noise && part.voice != Voice::Triangle ? Part { 2, 1, Voice::Triangle } : Part {};
         }
-    }
-
-    // A channel `voice` also takes over while it plays, or -1: the PSG's
-    // bass silences tone 3 and uses its period.
-    [[nodiscard]] int Claims(int channel, Voice voice) const noexcept {
-        return kind_ == BoardKind::Psg && channel == 3 && voice == Voice::Bass ? 2 : -1;
     }
 
     // How many settings the Shape control steps through for `voice` here.
@@ -129,8 +112,7 @@ public:
         case Voice::Pulse:
             return kind_ == BoardKind::Console && console_.EightDuties(channel) ? 8 : 4;
         case Voice::Wave: case Voice::ModWave: return kWaveCount;
-        case Voice::Noise: return kind_ == BoardKind::Micro ? 1 : 2;
-        case Voice::Buzzer: return 4;
+        case Voice::Noise: return 2;
         default: return 1;
         }
     }
@@ -141,77 +123,61 @@ public:
         den = 1;
         switch (kind_) {
         case BoardKind::Handheld: num = Handheld::kFrameCycles; break;
-        case BoardKind::Console:
+        default:
             // NESdev Wiki, "Cycle reference chart": 29780.5 CPU cycles a
             // frame on NTSC, 33247.5 on PAL.
-            num = revision_ == Console::kPal ? 66495 : 59561;
+            num = settings_.revision == Console::kPal ? 66495 : 59561;
             den = 2;
             break;
-        case BoardKind::Psg: num = Psg::kFrameCycles; break;
-        default: num = micro_.FrameCycles(); break;
         }
     }
 
     [[nodiscard]] double ClockHz() const noexcept {
         switch (kind_) {
         case BoardKind::Handheld: return static_cast<double>(gb::kClock);
-        case BoardKind::Console: return console_.CpuHz();
-        case BoardKind::Psg: return static_cast<double>(Psg::kClock);
-        default: return static_cast<double>(micro_.Clock());
+        default: return console_.CpuHz();
         }
     }
 
     [[nodiscard]] std::int64_t CycleAt(int frame) const noexcept {
         switch (kind_) {
         case BoardKind::Handheld: return handheld_.CycleAt(frame);
-        case BoardKind::Console: return console_.CycleAt(frame);
-        case BoardKind::Psg: return psg_.CycleAt(frame);
-        default: return micro_.CycleAt(frame);
+        default: return console_.CycleAt(frame);
         }
     }
 
     void RunTo(std::int64_t cycle) {
         switch (kind_) {
         case BoardKind::Handheld: handheld_.RunTo(cycle); break;
-        case BoardKind::Console: console_.RunTo(cycle); break;
-        case BoardKind::Psg: psg_.RunTo(cycle); break;
-        default: micro_.RunTo(cycle); break;
+        default: console_.RunTo(cycle); break;
         }
     }
 
     [[nodiscard]] bool PeriodFor(int channel, Voice voice, double hz, int shape, std::int64_t& period) const noexcept {
         switch (kind_) {
         case BoardKind::Handheld: return handheld_.PeriodFor(channel, voice, hz, shape, period);
-        case BoardKind::Console: return console_.PeriodFor(channel, voice, hz, shape, period);
-        case BoardKind::Psg: return psg_.PeriodFor(channel, voice, hz, shape, period);
-        default: return micro_.PeriodFor(channel, voice, hz, shape, period);
+        default: return console_.PeriodFor(channel, voice, hz, shape, period);
         }
     }
 
     void Start(int channel, const ChannelSettings& s) {
         switch (kind_) {
         case BoardKind::Handheld: handheld_.Start(channel, s); break;
-        case BoardKind::Console: console_.Start(channel, s); break;
-        case BoardKind::Psg: psg_.Start(channel, s); break;
-        default: micro_.Start(channel, s); break;
+        default: console_.Start(channel, s); break;
         }
     }
 
     void Change(int channel, const ChannelSettings& s) {
         switch (kind_) {
         case BoardKind::Handheld: handheld_.Change(channel, s); break;
-        case BoardKind::Console: console_.Change(channel, s); break;
-        case BoardKind::Psg: psg_.Change(channel, s); break;
-        default: micro_.Change(channel, s); break;
+        default: console_.Change(channel, s); break;
         }
     }
 
     void Stop(int channel) {
         switch (kind_) {
         case BoardKind::Handheld: handheld_.Stop(channel); break;
-        case BoardKind::Console: console_.Stop(channel); break;
-        case BoardKind::Psg: psg_.Stop(channel); break;
-        default: micro_.Stop(channel); break;
+        default: console_.Stop(channel); break;
         }
     }
 
@@ -224,26 +190,20 @@ public:
     void Render(int frames, Path path, float* left, float* right) {
         switch (kind_) {
         case BoardKind::Handheld: handheld_.Render(frames, path, left, right); break;
-        case BoardKind::Console: console_.Render(frames, path, left, right); break;
-        case BoardKind::Psg: psg_.Render(frames, path, left, right); break;
-        default: micro_.Render(frames, path, left, right); break;
+        default: console_.Render(frames, path, left, right); break;
         }
     }
 
     [[nodiscard]] const Handheld& HandheldBoard() const noexcept { return handheld_; }
     [[nodiscard]] const Console& ConsoleBoard() const noexcept { return console_; }
-    [[nodiscard]] const Psg& PsgBoard() const noexcept { return psg_; }
-    [[nodiscard]] const Micro& MicroBoard() const noexcept { return micro_; }
 
 private:
     static int Clamp(int revision, int count) noexcept { return revision < 0 ? 0 : revision >= count ? count - 1 : revision; }
 
     BoardKind kind_ = BoardKind::Handheld;
-    int revision_ = 0;
+    MachineSettings settings_;
     Handheld handheld_;
     Console console_;
-    Psg psg_;
-    Micro micro_;
 };
 
 } // namespace protocodus::reboot

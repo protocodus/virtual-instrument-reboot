@@ -16,7 +16,7 @@
 //
 // The envelope always runs as the YM2149's 32 steps. The AY-3-8910 has 16,
 // each twice as long; its DAC gives each pair of the 32 codes one level
-// (Boards/Micro.h), which is the same output.
+// (the data manual), which is the same output.
 //
 // Out() gives each channel's 5-bit DAC code: a fixed volume v is code
 // 2v + 1, the envelope its step, and a gated-off channel code 0.

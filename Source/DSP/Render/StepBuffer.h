@@ -64,6 +64,15 @@ public:
         std::memset(diff_ + blep::kTaps, 0, sizeof(std::int64_t) * static_cast<std::size_t>(frames));
     }
 
+    // Lands every step in flight at once, and returns the level it leaves.
+    double Land() noexcept {
+        for (std::int64_t& d : diff_) {
+            sum_ += d;
+            d = 0;
+        }
+        return static_cast<double>(sum_) / static_cast<double>(std::int64_t { 1 } << (kLevelBits + blep::kUnitBits + kFracBits));
+    }
+
     // The level the integral has settled to, once no step is in flight.
     [[nodiscard]] std::int64_t Settled() const noexcept {
         std::int64_t total = sum_;
