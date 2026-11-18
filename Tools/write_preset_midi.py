@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Write the committed README demo phrases, Docs/audio/midi/<NN>-<slug>.mid.
 
-Eight of the sixteen factory presets get a demo (README G3), each showing a
-different side of the boards: the handheld's square lead and its arpeggio,
-the console's gliding twin pulses, the cartridge saw and the disk unit's
-modulated wave, the PSG's periodic-noise bass, the micro's envelope buzz and
-its one-bit beeper. NN is the preset's program number. Every phrase is
+Every one of the eight factory presets gets a demo (README G3): the
+handheld's square lead, wave bass, arpeggio and noise snare, the console's
+triangle bass, its gliding pulses doubled, the cartridge saw and the disk
+unit's modulated wave. NN is the preset's program number. Every phrase is
 original. The .mid files are the committed sources the demo renderer reads;
 this script only records how they were written. Re-run it only to change a
 phrase on purpose, and commit the changed .mid files on their own:
@@ -128,7 +127,7 @@ def pocket_arp():
 
 
 def pulse_glide():
-    # A legato line the twin pulses glide through, vibrato on the long notes.
+    # A legato line the doubled pulses glide through, vibrato on the long notes.
     p = Phrase(100)
     p.legato(0, [("A4", 1), ("C5", 0.5), ("D5", 0.5), ("E5", 2), ("G5", 0.5), ("E5", 0.5),
                  ("D5", 1), ("C5", 1.5), ("D5", 0.5), ("A4", 3)], velocity=100)
@@ -162,18 +161,36 @@ def disk_organ():
     return p
 
 
-def periodic_bass():
-    # The PSG's tones below their lowest note, as its periodic noise: two
-    # octaves under these keys.
+def wave_bass():
+    # A bass line on the handheld's wave channel, an octave under these keys,
+    # gliding where the keys overlap.
     p = Phrase(100)
-    p.line(0, [("C4", 0.5), ("C4", 0.5), ("G4", 0.5), ("C4", 0.5), ("Bb3", 0.5), ("Bb3", 0.5), ("F4", 0.5),
-               ("Bb3", 0.5), ("Ab3", 0.5), ("Ab3", 0.5), ("Eb4", 0.5), ("Ab3", 0.5), ("G3", 0.5), ("D4", 0.5),
-               ("G3", 0.5), ("B3", 0.5), ("C4", 2)], velocity=110, gate=0.8)
+    p.legato(0, [("C4", 0.5), ("C4", 0.5), ("G4", 0.5), ("C4", 0.5), ("Bb3", 0.5), ("Bb3", 0.5), ("F4", 0.5),
+                 ("Bb3", 0.5), ("Ab3", 0.5), ("Ab3", 0.5), ("Eb4", 0.5), ("Ab3", 0.5), ("G3", 0.5), ("D4", 0.5),
+                 ("G3", 0.5), ("B3", 0.5), ("C4", 2)], velocity=110)
     return p
 
 
-def buzz_bass():
-    # The micro's envelope run as an oscillator, a saw an octave down.
+def static_snare():
+    # A groove on the noise channel: low keys a thud, middle keys a snare,
+    # high keys a hat, each as loud as it is struck.
+    p = Phrase(116)
+    for bar in range(4):
+        b = bar * 4
+        for beat in (0, 2.5):
+            p.note(b + beat, 0.25, "C2", 120)
+        for beat in (1, 3):
+            p.note(b + beat, 0.25, "E5", 112)
+        for i in range(8):
+            p.note(b + i * 0.5, 0.1, "C8", 64 if i % 2 else 84)
+    p.note(15.5, 0.25, "E5", 96)
+    p.note(15.75, 0.25, "E5", 120)
+    return p
+
+
+def triangle_bass():
+    # The console's triangle an octave under these keys: no volume, so every
+    # note is as loud and stops dead.
     p = Phrase(90)
     p.line(0, [("E3", 0.75), ("E3", 0.25), ("E4", 0.5), ("E3", 0.5), ("G3", 0.75), ("A3", 0.25),
                ("B3", 0.5), ("D4", 0.5), ("E3", 0.75), ("E3", 0.25), ("E4", 0.5), ("D4", 0.5),
@@ -181,20 +198,11 @@ def buzz_bass():
     return p
 
 
-def one_bit_melody():
-    # The beeper's own kind of tune: short notes, one at a time.
-    p = Phrase(116)
-    p.line(0, [("C5", 0.5), ("E5", 0.5), ("G5", 0.5), ("C6", 0.5), ("B5", 0.5), ("G5", 0.5), ("A5", 1),
-               ("F5", 0.5), ("A5", 0.5), ("C6", 0.5), ("A5", 0.5), ("G5", 1), ("E5", 1),
-               ("D5", 0.5), ("E5", 0.5), ("F5", 0.5), ("D5", 0.5), ("C5", 2)], velocity=110, gate=0.75)
-    return p
-
-
 # Slug and phrase of each demo's preset; the number is its place in the bank.
 DEMOS = [
-    ("square-lead", square_lead), ("pocket-arp", pocket_arp), ("pulse-glide", pulse_glide),
-    ("saw-lead", saw_lead), ("disk-organ", disk_organ), ("periodic-bass", periodic_bass),
-    ("buzz-bass", buzz_bass), ("one-bit-melody", one_bit_melody),
+    ("square-lead", square_lead), ("wave-bass", wave_bass), ("pocket-arp", pocket_arp),
+    ("static-snare", static_snare), ("triangle-bass", triangle_bass), ("pulse-glide", pulse_glide),
+    ("saw-lead", saw_lead), ("disk-organ", disk_organ),
 ]
 
 
