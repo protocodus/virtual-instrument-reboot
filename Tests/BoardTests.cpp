@@ -179,9 +179,18 @@ void TestPitch(Machine& m) {
                     const std::string what = std::string(setup.name) + " channel " + std::to_string(part.first) + " shape "
                                              + std::to_string(shape) + " key " + std::to_string(key);
                     const double f = Expected(setup.settings, part.voice, period);
-                    // The period is the nearest whole one in pitch.
-                    const double up = Expected(setup.settings, part.voice, period + 1);
-                    const double down = Expected(setup.settings, part.voice, period - 1);
+                    // The period is the nearest whole one in pitch. On FDS and
+                    // Namco 163 above single-cycle 12-bit/18-bit ceilings, the
+                    // driver folds multiple cycles per table, so valid encoded
+                    // periods step by 2 or 4.
+                    std::int64_t step = 1;
+                    if (part.voice == Voice::ModWave)
+                        step = period > 2 * 0xFFF ? 4 : period > 0xFFF ? 2 : 1;
+                    else if (setup.settings.board == BoardKind::Console && setup.settings.expansion == Console::kN163
+                             && part.voice == Voice::Wave)
+                        step = period > 2 * 0x3FFFF ? 4 : period > 0x3FFFF ? 2 : 1;
+                    const double up = Expected(setup.settings, part.voice, period + step);
+                    const double down = Expected(setup.settings, part.voice, period - step);
                     Check(std::fabs(Cents(f, hz)) <= std::fabs(Cents(up, hz)) + 1.0e-9
                               && std::fabs(Cents(f, hz)) <= std::fabs(Cents(down, hz)) + 1.0e-9,
                           what + ": the period is not the nearest");
@@ -191,7 +200,7 @@ void TestPitch(Machine& m) {
                     ChannelSettings note;
                     note.voice = part.voice;
                     note.period = period;
-                    note.volume = 15;
+                    note.volume = m.QuantizeVolume(part.first, part.voice, 1.0);
                     note.shape = shape;
                     const double seconds = f < 60.0 ? 2.5 : 1.2;
                     const Render r = Play(m, setup.settings, part.first, note, seconds, Path::Pin);
@@ -232,7 +241,7 @@ ChannelSettings Note(Machine& m, int channel, Voice voice, double hz, int shape,
     ChannelSettings n;
     n.voice = voice;
     Check(m.PeriodFor(channel, voice, hz, shape, n.period), "a level note out of reach");
-    n.volume = volume;
+    n.volume = m.QuantizeVolume(channel, voice, static_cast<double>(volume) / 15.0);
     n.shape = shape;
     return n;
 }
@@ -278,7 +287,7 @@ void TestLevels(Machine& m) {
     const double famicomPulse = level(famicom, 0, Voice::Pulse, 440.0, 2);
     const auto cart = [&](int expansion, int channels, Voice voice, int shape, double hz, int volume = 15) {
         const MachineSettings s { BoardKind::Console, 1, expansion, channels, 0 };
-        return level(s, Console::kApuChannels, voice, hz, shape, volume) / famicomPulse;
+        return level(s, ConsoleDriver::kApuChannels, voice, hz, shape, volume) / famicomPulse;
     };
     Check(std::fabs(Db(cart(Console::kVrc6, 4, Voice::Pulse, 7, 440.0))) < 0.05, "vrc6 pulse level");
     Check(std::fabs(Db(cart(Console::kMmc5, 4, Voice::Pulse, 2, 440.0))) < 0.05, "mmc5 pulse level");
@@ -324,8 +333,8 @@ void TestLevels(Machine& m) {
     {
         const MachineSettings s5b { BoardKind::Console, 1, Console::k5B, 4, 0 };
         const auto ratio = [&](int volume) {
-            return level(s5b, Console::kApuChannels, Voice::Tone, 440.0, 0, volume, Path::Line)
-                   / level(s5b, Console::kApuChannels, Voice::Tone, 440.0, 0, volume);
+            return level(s5b, ConsoleDriver::kApuChannels, Voice::Tone, 440.0, 0, volume, Path::Line)
+                   / level(s5b, ConsoleDriver::kApuChannels, Voice::Tone, 440.0, 0, volume);
         };
         const double v14 = ratio(14), v15 = ratio(15);
         Check(std::fabs(Db(v14)) < 0.1, "5b amplifier at volume 14 " + std::to_string(Db(v14)));
@@ -516,6 +525,152 @@ void TestKernels() {
     }
 }
 
+void TestBlackboxBus() {
+    // Handheld blackbox: SM83 bus timing (8/12 cycles), NR52/register reads,
+    // and Path::Line 50 us DAC disable decay on CH3.
+    {
+        Handheld hh;
+        hh.Prepare(kRate);
+        hh.Reset(Handheld::kColor);
+        hh.Write(0xFF26, 0x80);
+        hh.Write(0xFF24, 0x77);
+        hh.Write(0xFF25, 0xFF);
+        hh.FinishBoot();
+        Check((hh.Read(0xFF26) & 0x80) == 0x80, "handheld NR52 read back power bit");
+
+        const std::int64_t t0 = hh.Now();
+        hh.Write(0xFF17, 0x00); // executes immediately at t0; nextCycle = t0 + 12, lastAddr = 0xFF17
+        hh.Write(0xFF17, 0xF8); // same-address write scheduled at t0 + 12; nextCycle = t0 + 12 + 8 = t0 + 20
+        hh.Write(0xFF19, 0x80); // different-address write scheduled at t0 + 20; nextCycle = t0 + 32
+        Check(hh.Now() == t0 && !hh.Chip().DacOn(1), "handheld immediate first write leaves DAC off at t0");
+        hh.RunTo(t0 + 12);
+        Check(!hh.Chip().DacOn(1), "handheld second write not yet applied before t0 + 12");
+        hh.RunTo(t0 + 13);
+        Check(hh.Chip().DacOn(1) && (hh.Read(0xFF26) & 0x02) == 0,
+              "handheld same-address write applied at +12, trigger not yet at +13");
+        hh.RunTo(t0 + 20);
+        Check((hh.Read(0xFF26) & 0x02) == 0, "handheld trigger write spaced +8 T-cycles after repeated $FF17");
+        hh.RunTo(t0 + 21);
+        Check((hh.Read(0xFF26) & 0x02) == 0x02, "handheld trigger write lands at t0 + 20 (+8 T-cycles)");
+
+        // Load all-$FF CH3 wave, let Line's DC coupling settle while playing, then
+        // turn off CH3 DAC and verify the 50 us residual decay transitions smoothly
+        // and settles back toward zero.
+        hh.Reset(Handheld::kColor);
+        hh.Write(0xFF26, 0x80);
+        hh.Write(0xFF24, 0x77);
+        hh.Write(0xFF25, 0xFF);
+        hh.FinishBoot();
+        for (std::uint16_t a = 0xFF30; a <= 0xFF3F; ++a)
+            hh.Write(a, 0xFF);
+        hh.Write(0xFF1A, 0x80);
+        hh.Write(0xFF1C, 0x20);
+        hh.Write(0xFF1D, 0x00);
+        hh.Write(0xFF1E, 0x84);
+        for (int b = 0; b < 16; ++b) {
+            float warmL[128] {};
+            float warmR[128] {};
+            hh.Render(128, Path::Line, warmL, warmR);
+        }
+        hh.Write(0xFF1A, 0x00);
+        float earlyL[128] {};
+        float earlyR[128] {};
+        hh.Render(128, Path::Line, earlyL, earlyR);
+        double earlyPeak = 0.0;
+        double maxDeriv = 0.0;
+        for (int i = 0; i < 128; ++i) {
+            earlyPeak = std::max(earlyPeak, std::fabs(static_cast<double>(earlyL[i])));
+            if (i > 0)
+                maxDeriv = std::max(maxDeriv, std::fabs(static_cast<double>(earlyL[i] - earlyL[i - 1])));
+        }
+        float lateL[128] {};
+        float lateR[128] {};
+        for (int b = 0; b < 16; ++b) {
+            std::fill(std::begin(lateL), std::end(lateL), 0.0f);
+            std::fill(std::begin(lateR), std::end(lateR), 0.0f);
+            hh.Render(128, Path::Line, lateL, lateR);
+        }
+        double latePeak = 0.0;
+        for (float s : lateL)
+            latePeak = std::max(latePeak, std::fabs(static_cast<double>(s)));
+        Check(earlyPeak > 0.1 && maxDeriv < earlyPeak * 0.65 && latePeak < earlyPeak * 0.25,
+              "handheld Path::Line CH3 DAC off fades over 50 us decay (early=" + std::to_string(earlyPeak)
+                  + " deriv=" + std::to_string(maxDeriv) + " late=" + std::to_string(latePeak) + ")");
+    }
+
+    // Console blackbox: 6502 bus spacing, 5B $C000/$E000 latch, MMC5 $5011 PCM
+    // inverted step, and FDS $4089 2/3/4/5 kHz RC corner shift.
+    {
+        Console con;
+        con.Prepare(kRate);
+        con.Reset(Console::kFamicom, Console::k5B);
+        con.FinishBoot();
+        con.Write(0xC000, 0x07);
+        con.Write(0xE000, 0x3E);
+        con.Write(0xC000, 0x08);
+        con.Write(0xE000, 0x0F);
+        con.Write(0xC000, 0x00);
+        con.Write(0xE000, 0xA0);
+        con.Write(0xC000, 0x01);
+        con.Write(0xE000, 0x00);
+        double peak5B = 0.0;
+        for (int b = 0; b < 2; ++b) {
+            float left[256] {};
+            float right[256] {};
+            con.Render(256, Path::Pin, left, right);
+            for (float s : left)
+                peak5B = std::max(peak5B, std::fabs(static_cast<double>(s)));
+        }
+        Check(peak5B > 0.01, "console 5B plays via $C000/$E000 bus writes");
+
+        con.Reset(Console::kFamicom, Console::kMmc5);
+        con.Write(0x5015, 0x00);
+        con.Write(0x5010, 0x00);
+        con.Write(0x5011, 0x00);
+        con.FinishBoot();
+        con.Write(0x5011, 0xFF);
+        float left[256] {};
+        float right[256] {};
+        con.Render(256, Path::Pin, left, right);
+        double minSample = 0.0;
+        for (float s : left)
+            minSample = std::min(minSample, static_cast<double>(s));
+        Check(minSample < -0.15, "console MMC5 $5011 step outputs inverted PCM on mixer");
+
+        auto fdsAmp = [&](int master, int waveCycles) {
+            con.Reset(Console::kFamicom, Console::kFds);
+            con.Write(0x4023, 0x83);
+            con.Write(0x4080, 0xA0);
+            con.Write(0x4084, 0x80);
+            con.Write(0x408A, 0xE8);
+            con.Write(0x4089, static_cast<std::uint8_t>(0x80 | (master & 3)));
+            for (int i = 0; i < 64; ++i) {
+                const int halfPeriod = 32 / waveCycles;
+                const std::uint8_t sample = ((i / halfPeriod) & 1) ? 63 : 0;
+                con.Write(static_cast<std::uint16_t>(0x4040 + i), sample);
+            }
+            con.Write(0x4089, static_cast<std::uint8_t>(master & 3));
+            con.Write(0x4082, 0x27);
+            con.Write(0x4083, 0x09); // ~1000 Hz * waveCycles
+            con.FinishBoot();
+            double peak = 0.0;
+            for (int b = 0; b < 8; ++b) {
+                float bufL[256] {};
+                float bufR[256] {};
+                con.Render(256, Path::Line, bufL, bufR);
+                if (b >= 3) {
+                    for (float s : bufL)
+                        peak = std::max(peak, std::fabs(static_cast<double>(s)));
+                }
+            }
+            return peak;
+        };
+        const double r0 = fdsAmp(0, 4) / fdsAmp(0, 1);
+        const double r3 = fdsAmp(3, 4) / fdsAmp(3, 1);
+        Check(r3 > r0 * 1.25, "console FDS $4089 master volume shifts RC corner higher (2 kHz vs 5 kHz)");
+    }
+}
+
 int main() {
     TestKernels();
     auto machine = std::make_unique<Machine>();
@@ -525,6 +680,7 @@ int main() {
     TestNoise(*machine);
     TestStopAndRates(*machine);
     TestRestAfterReset(*machine);
+    TestBlackboxBus();
     if (failures == 0)
         std::printf("Reboot.Boards: all checks passed\n");
     return failures == 0 ? 0 : 1;

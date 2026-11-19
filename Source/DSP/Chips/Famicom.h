@@ -108,9 +108,12 @@ public:
             } else if (reg == 2) {
                 saw_.period = (saw_.period & 0xFF) | ((value & 15) << 8);
                 saw_.enabled = (value & 0x80) != 0;
-                // Clearing E zeroes the accumulator but not the divider.
-                if (!saw_.enabled)
+                // Clearing E zeroes the accumulator and resets its 14-clock phase
+                // counter, but does not reset the divider (NESdev, VRC6 audio).
+                if (!saw_.enabled) {
                     saw_.accumulator = 0;
+                    saw_.clocks = 0;
+                }
             }
             saw_.timer.period = (saw_.period >> shift_) + 1;
         }
@@ -403,6 +406,15 @@ public:
             sink(now_);
     }
 
+    // A CPU read from $4800-$4FFF at Now() (NESdev, Namco 163 audio).
+    [[nodiscard]] std::uint8_t ReadData() noexcept {
+        CatchUp();
+        const std::uint8_t value = ram_[pointer_];
+        if (increment_ && pointer_ < 0x7F)
+            ++pointer_;
+        return value;
+    }
+
 private:
     // One channel's update (NESdev: phase = (phase + freq) mod (length x
     // 65536); the sample at ((phase >> 16) + wave address) & $FF, two to a
@@ -500,6 +512,10 @@ public:
 
     template <class Sink>
     void Run(std::int64_t to, Sink& sink) {
+        if (!live_) {
+            now_ = to;
+            return;
+        }
         for (;;) {
             std::int64_t next = Earliest(to, tickDue_);
             if (EnvelopesRun()) {
@@ -515,6 +531,8 @@ public:
                         e->Clock();
                         e->timer.due += e->timer.period;
                     }
+                if (waveHalt_)
+                    latchedGain_ = volumeEnvelope_.gain;
             }
             if (tickDue_ == now_) {
                 Tick();
@@ -528,6 +546,7 @@ public:
 
     template <class Sink>
     void Write(std::uint16_t address, std::uint8_t value, Sink& sink) {
+        CatchUp();
         if (address >= 0x4040 && address <= 0x407F) {
             if (waveWrite_)
                 wave_[address - 0x4040] = value & 0x3F;
@@ -539,12 +558,15 @@ public:
                 enabled_ = (value & 2) != 0;
                 if (!enabled_) {
                     volumeEnvelope_.gain = 0;
+                    latchedGain_ = 0;
                     accumulator_ = 0;
                     counter_ = 0;
                 }
                 break;
             case 0x4080:
                 volumeEnvelope_.Write(value, now_, Speed());
+                if (waveHalt_)
+                    latchedGain_ = volumeEnvelope_.gain;
                 break;
             case 0x4082:
                 pitch_ = (pitch_ & 0xF00) | value;
@@ -554,8 +576,10 @@ public:
                 // Bit 7 halts the wave and resets its accumulator; bit 6
                 // stops the envelopes and resets their timers.
                 waveHalt_ = (value & 0x80) != 0;
-                if (waveHalt_)
+                if (waveHalt_) {
                     accumulator_ = 0;
+                    latchedGain_ = volumeEnvelope_.gain;
+                }
                 envelopeHalt_ = (value & 0x40) != 0;
                 if (envelopeHalt_) {
                     volumeEnvelope_.Restart(now_, Speed());
@@ -591,11 +615,17 @@ public:
                 master_ = value & 3;
                 waveWrite_ = (value & 0x80) != 0;
                 break;
-            case 0x408A:
+            case 0x408A: {
+                const int oldSpeed = speed_;
                 speed_ = value;
                 volumeEnvelope_.SetSpeed(Speed());
                 modEnvelope_.SetSpeed(Speed());
+                if (oldSpeed == 0 && speed_ != 0) {
+                    volumeEnvelope_.timer.CatchUp(now_);
+                    modEnvelope_.timer.CatchUp(now_);
+                }
                 break;
+            }
             default:
                 break;
             }
@@ -635,12 +665,33 @@ private:
 
     [[nodiscard]] int Speed() const noexcept { return speed_; }
     [[nodiscard]] bool EnvelopesRun() const noexcept { return enabled_ && !envelopeHalt_ && speed_ != 0; }
+    [[nodiscard]] bool ModulatorRunning() const noexcept { return !modHalt_ && (modPitch_ != 0 || modForce_); }
+    [[nodiscard]] bool EnvelopesActive() const noexcept {
+        if (!EnvelopesRun())
+            return false;
+        const bool volMoves = !(volumeEnvelope_.reg & 0x80)
+            && ((volumeEnvelope_.reg & 0x40) ? volumeEnvelope_.gain < 32 : volumeEnvelope_.gain > 0);
+        const bool modMoves = !(modEnvelope_.reg & 0x80)
+            && ((modEnvelope_.reg & 0x40) ? modEnvelope_.gain < 32 : modEnvelope_.gain > 0);
+        return volMoves || modMoves;
+    }
+    [[nodiscard]] bool ShouldBeLive() const noexcept {
+        if (!enabled_)
+            return false;
+        if (EnvelopesActive())
+            return true;
+        if (waveHalt_ && !ModulatorRunning())
+            return false;
+        if (latchedGain_ == 0 && volumeEnvelope_.gain == 0 && !ModulatorRunning())
+            return false;
+        return true;
+    }
 
-    // NESdev, FDS audio: the modulated pitch.
+    // NESdev, FDS audio: the modulated pitch (rainwarrior's RP2C33 formula).
     [[nodiscard]] std::uint32_t WavePitch() const noexcept {
         int temp = counter_ * modEnvelope_.gain;
-        if ((temp & 0x0F) && !(temp & 0x800))
-            temp += 0x20;
+        if ((temp & 0x0F) != 0 && ((temp >> 4) & 0x80) == 0)
+            temp += counter_ < 0 ? -0x10 : 0x20;
         temp += 0x400;
         const std::uint32_t scaled = (static_cast<std::uint32_t>(temp) >> 4) & 0xFF;
         return (pitch_ * scaled) & 0xFFFFF;
@@ -652,7 +703,7 @@ private:
         // The modulator: its 12-bit pitch into an 18-bit accumulator whose
         // bits 13-17 address the table; each carry out of bit 11 applies
         // the entry to the 7-bit signed counter.
-        if (!modHalt_ && (modPitch_ != 0 || modForce_)) {
+        if (ModulatorRunning()) {
             const std::uint32_t sum = modAccumulator_ + modPitch_;
             const bool carry = modForce_ || ((modAccumulator_ & 0xFFF) + modPitch_) > 0xFFF;
             modAccumulator_ = sum & 0x3FFFF;
@@ -663,17 +714,38 @@ private:
             }
         }
         // The wave: the modulated pitch into a 24-bit accumulator whose top
-        // six bits are the position. A gain change takes effect only at
-        // position 0.
+        // six bits are the position. A gain change takes effect at position 0
+        // or whenever the 24-bit accumulator wraps.
         if (!waveHalt_ && !waveWrite_) {
+            const std::uint32_t prev = accumulator_;
             accumulator_ = (accumulator_ + WavePitch()) & 0xFFFFFF;
-            const int position = static_cast<int>(accumulator_ >> 18);
-            if (position == 0)
+            if ((accumulator_ >> 18) == 0 || accumulator_ < prev)
                 latchedGain_ = volumeEnvelope_.gain;
         }
     }
 
+    void CatchUp() noexcept {
+        if (live_)
+            return;
+        if (EnvelopesRun()) {
+            volumeEnvelope_.timer.CatchUp(now_);
+            modEnvelope_.timer.CatchUp(now_);
+        }
+        if (tickDue_ < now_) {
+            const std::int64_t k = (now_ - tickDue_ - 1) / kTick + 1;
+            tickDue_ += k * kTick;
+            if (enabled_ && !waveHalt_ && !waveWrite_) {
+                const std::uint64_t pitch = WavePitch();
+                accumulator_ = static_cast<std::uint32_t>((accumulator_ + static_cast<std::uint64_t>(k) * pitch) & 0xFFFFFFu);
+            }
+        }
+    }
+
     bool Update() noexcept {
+        const bool live = ShouldBeLive();
+        if (live && !live_)
+            CatchUp();
+        live_ = live;
         int code = out_;
         if (!waveWrite_) {
             // Halted, the output holds the sample at $4040.
@@ -696,7 +768,8 @@ private:
     std::uint16_t pitch_ = 0, modPitch_ = 0;
     int counter_ = 0, master_ = 0, shownMaster_ = 0, out_ = 0;
     std::uint8_t latchedGain_ = 0, speed_ = 0xE8;     // the BIOS writes $E8
-    bool enabled_ = true, waveHalt_ = true, envelopeHalt_ = false, modHalt_ = true, modForce_ = false, waveWrite_ = false;
+    bool enabled_ = true, waveHalt_ = true, envelopeHalt_ = false, modHalt_ = true, modForce_ = false, waveWrite_ = false,
+         live_ = false;
 };
 
 } // namespace protocodus::reboot::famicom

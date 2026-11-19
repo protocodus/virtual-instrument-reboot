@@ -498,10 +498,11 @@ double Engine::Pitch(const Slot& n, double cents) const {
     return 440.0 * std::pow(2.0, (semitones - 69.0) / 12.0);
 }
 
-// The whole volume step the envelope has reached, at the level and touch.
-int Engine::Volume(const Slot& n) const noexcept {
+// The normalised level [0, 1] the envelope has reached, at the level and touch.
+double Engine::Gain(const Slot& n) const noexcept {
     const double touch = 1.0 - velocity_ * (1.0 - n.velocity / 127.0);
-    return Clamp(Round(level_ * touch * n.env / 15.0), 0, 15);
+    const double gain = (level_ / 15.0) * touch * (n.env / 15.0);
+    return gain < 0.0 ? 0.0 : gain > 1.0 ? 1.0 : gain;
 }
 
 // The slot's settings now. False when its pitch is out of its channel's
@@ -513,7 +514,7 @@ bool Engine::Compose(int slot, ChannelSettings& s, double cents) const {
     s.voice = n.voice;
     s.shape = shape_ % m.Shapes(ch, n.voice);
     s.mod = mod_;
-    s.volume = Volume(n);
+    s.volume = m.QuantizeVolume(ch, n.voice, Gain(n));
     if (m.PeriodFor(ch, n.voice, Pitch(n, cents), s.shape, s.period))
         return true;
     s.period = n.started ? n.written.period : s.period;
@@ -603,15 +604,26 @@ void Engine::Process(float* left, float* right, int frames) {
         const std::int64_t end = machines_[0].CycleAt(m);
         for (;;) {
             const std::int64_t tick = (tickNum_ + periodDen_ - 1) / periodDen_;
-            if (tick >= end)
+            std::int64_t next = tick;
+            for (int b = 0; b < boards_; ++b) {
+                next = Earliest(next, machines_[b].NextEvent());
+                if (double_)
+                    next = Earliest(next, twins_[b].NextEvent());
+            }
+            if (next >= end)
                 break;
             for (int b = 0; b < boards_; ++b) {
-                machines_[b].RunTo(tick);
-                if (double_)
-                    twins_[b].RunTo(tick);
+                machines_[b].RunTo(next);
+                machines_[b].ServiceAt(next);
+                if (double_) {
+                    twins_[b].RunTo(next);
+                    twins_[b].ServiceAt(next);
+                }
             }
-            Tick();
-            tickNum_ += periodNum_;
+            if (next == tick) {
+                Tick();
+                tickNum_ += periodNum_;
+            }
         }
         for (int b = 0; b < boards_; ++b) {
             machines_[b].Render(m, path_, bus_[0], bus_[1]);

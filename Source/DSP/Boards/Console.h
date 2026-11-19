@@ -1,9 +1,9 @@
 #pragma once
 
-// The console board: the 2A03's APU (Chips/NesApu.h) on the CPU clock, with
-// a Famicom cartridge's sound chip beside it (Chips/Famicom.h, and the 5B
-// as Chips/Ay8910.h at a 16-cycle tick), their DACs, the mixer and the
-// machine's output stage.
+// The console board blackbox: the 2A03's APU (Chips/NesApu.h) on the CPU
+// clock, with a Famicom cartridge's sound chip beside it (Chips/Famicom.h, and
+// the 5B as Chips/Ay8910.h at a 16-cycle tick), their DACs, the mixer, the 6502
+// CPU bus, and the machine's output stage.
 //
 // Revisions: the NTSC front-loader, the NTSC Famicom and the PAL
 // front-loader. Only the Famicom's cartridge slot carries the cartridge's
@@ -25,15 +25,18 @@
 // - VRC6: its 6-bit DAC sum, a pulse at 15 as loud as the APU's and of
 //   opposite polarity ("VRC6 audio", reported).
 // - MMC5: "equivalent in volume to the corresponding APU channels", "the
-//   polarity of all MMC5 channels is reversed" (reported). Mixed per step
-//   at the APU pulse's step, linearly (our reading; Known gaps).
+//   polarity of all MMC5 channels is reversed" (reported). Pulses mix at
+//   the APU pulse's step and $5011 PCM at the 7-bit $4011 step (our reading;
+//   Known gaps).
 // - Namco 163: in 1-channel mode its loudest square, 225 steps peak to peak
 //   at (15 - 8) and (0 - 8) times 15, is 11 to 13 dB louder than the APU's
 //   loudest square for submapper 3's cartridges; we take the middle, 12 dB.
 //   Polarity unstated; taken as the APU's.
 // - Disk unit: about 2.4 times a 2A03 square at full volume, same polarity,
-//   through its own RC low-pass of about 2 kHz; the master volume divides
-//   by 1, 1.5, 2 or 2.5 ("FDS audio", reported).
+//   through its own RC low-pass (2 kHz at $4089 master 0, scaling inversely
+//   with Yuri213212's measured 2-2R DAC output impedance across $4089 steps 0..3:
+//   12k, 8k, 6k, 4.8k -> 2, 3, 4, 5 kHz; reported, "FDS audio" & NESdev);
+//   the master volume divides by 1, 1.5, 2 or 2.5 ("FDS audio", reported).
 // - 5B: 1.5 dB a step of its 5-bit DAC (3 dB a volume step), codes 0 and 1
 //   silent ("Sunsoft 5B audio", reported). Its level against the APU is
 //   Brad Smith's survey (nes-audio-tests, db_5b, results in the NESdev
@@ -73,12 +76,10 @@
 #include "../Chips/Ay8910.h"
 #include "../Chips/Famicom.h"
 #include "../Chips/NesApu.h"
-#include "../Driver/Waves.h"
 #include "Board.h"
 
 #include <cmath>
 #include <cstdint>
-#include <initializer_list>
 
 namespace protocodus::reboot {
 
@@ -86,15 +87,19 @@ class Console {
 public:
     enum Revision { kFrontLoader, kFamicom, kPal, kRevisions };
     enum Cartridge { kNone, kVrc6, kMmc5, kN163, kFds, k5B, kCartridges };
-    static constexpr int kApuChannels = 4;          // the DMC is a held level
-    static constexpr int kMaxChannels = kApuChannels + 8;
     static constexpr double kPulse15 = 95.88 / (8128.0 / 15.0 + 100.0);
 
     // Setup.
     void Prepare(int sampleRate) {
         rate_ = sampleRate;
         DesignPinBlocker(pinBlocker_, sampleRate);
-        fdsLowPass_.Design(FirstOrder::Kind::LowPass, 2000.0, sampleRate);
+        // Reported: NESdev "FDS audio" (~2 kHz RC low-pass) + Yuri213212's
+        // RP2C33 2-2R DAC output impedance measurements across $4089 steps 0..3
+        // (~12k, 8k, 6k, 4.8k -> corner scales proportionally to 2, 3, 4, 5 kHz).
+        static constexpr double kFdsCornerHz[4] = { 2000.0, 3000.0, 4000.0, 5000.0 };
+        for (int m = 0; m < 4; ++m)
+            fdsLowPassCoeffs_[m] = FirstOrder::ComputeCoefficients(FirstOrder::Kind::LowPass, kFdsCornerHz[m], sampleRate);
+        fdsLowPass_.SetCoefficients(FirstOrder::Kind::LowPass, fdsLowPassCoeffs_[0]);
         mmc5Board_.Design(FirstOrder::Kind::HighPass, 1.0 / (2.0 * 3.141592653589793 * 15000.0 * 100e-9), sampleRate);
         s5bApuIn_.Design(FirstOrder::Kind::HighPass, 12.0, sampleRate);
         s5bInternal_.Design(FirstOrder::Kind::HighPass, 20.0, sampleRate);
@@ -105,25 +110,23 @@ public:
             curve5B_[i] = std::pow(1.0 + i * (kCurveTop - 1.0) / kCurveSteps, 1.0 / 2.7);
     }
 
-    // n163Channels: how many channels the Namco 163 runs (1-8).
-    void Reset(int revision, int cartridge, int n163Channels, int dmcLevel) noexcept {
+    void Reset(int revision, int cartridge) noexcept {
         revision_ = revision;
         cartridge_ = revision == kFamicom ? cartridge : kNone;
-        n163Count_ = n163Channels < 1 ? 1 : n163Channels > 8 ? 8 : n163Channels;
         const nes::Region region = revision == kPal ? nes::Region::Pal : nes::Region::Ntsc;
         apu_.Reset(region);
         const nes::Clock clock = nes::kCpuClock[revision == kPal ? 1 : 0];
         cpuHz_ = static_cast<double>(clock.numerator) / static_cast<double>(clock.denominator);
         tb_.Set(clock.numerator, clock.denominator, rate_);
         mix_.Clear();
+        bus_.Clear();
         pinBlocker_.Reset();
+        fdsLowPass_.SetCoefficients(FirstOrder::Kind::LowPass, fdsLowPassCoeffs_[0]);
         fdsLowPass_.Reset();
         mmc5Board_.Reset();
         s5bApuIn_.Reset();
         s5bInternal_.Reset();
         s5bOut_.Reset();
-        for (Shadow& s : shadow_)
-            s = Shadow {};
         highPass_.Design(FirstOrder::Kind::HighPass, revision == kFamicom ? 37.0 : 90.0, rate_);
         if (revision == kFamicom)
             lowPass_.Design(FirstOrder::Kind::Pass, 0.0, rate_);
@@ -132,175 +135,73 @@ public:
         highPass_.Reset();
         lowPass_.Reset();
 
-        Sink sink { this };
-        // A sound driver's start: frame IRQs off, the four channels on, the
-        // pulses' sweeps negating (so the sweep cannot mute a low note:
-        // NESdev, "APU Sweep"), everything silent at constant volume.
-        apu_.Write(0x4017, 0x40, sink);
-        apu_.Write(0x4015, 0x0F, sink);
-        for (std::uint16_t a : { 0x4000, 0x4004, 0x400C })
-            apu_.Write(a, 0x30, sink);
-        apu_.Write(0x4001, 0x08, sink);
-        apu_.Write(0x4005, 0x08, sink);
-        apu_.Write(0x4008, 0x00, sink);
-        apu_.Write(0x4011, static_cast<std::uint8_t>(dmcLevel & 0x7F), sink);
-
-        CartSink cart { this };
         vrc6_.Reset();
         mmc5_.Reset();
         n163_.Reset();
         fds_.Reset();
         s5b_.Reset(16, true);
-        switch (cartridge_) {
-        case kMmc5:
-            mmc5_.Write(0x5015, 0x03, cart);
-            mmc5_.Write(0x5000, 0x30, cart);
-            mmc5_.Write(0x5004, 0x30, cart);
-            break;
-        case kN163:
-            n163_.Write(0xE000, 0x00, cart);
-            // The channel count in $7F's bits 6-4; every channel's wave
-            // address and length set as Start loads them.
-            N163Poke(0x7F, static_cast<std::uint8_t>((n163Count_ - 1) << 4));
-            break;
-        case kFds:
-            fds_.Write(0x4023, 0x83, cart);
-            fds_.Write(0x4080, 0x80, cart);
-            fds_.Write(0x4084, 0x80, cart);
-            fds_.Write(0x4089, 0x00, cart);
-            break;
-        case k5B:
-            S5BWrite(7, 0x3F);
-            break;
-        default:
-            break;
-        }
+        s5bAddr_ = 0;
+        fdsMaster_ = 0;
+        fdsPending_ = 0;
 
-        // Ours: a machine chosen is heard as one that has stood at rest, its
-        // output stages settled on the level the writes above leave (the
-        // triangle held on its first step, the DMC on Bias), not as one
-        // switched on that moment, whose step from nothing would thump
-        // through the Pin blocker on every reset.
-        const double apu = mix_.Land(0), other = mix_.Land(1);
-        fdsLowPass_.Settle(other);
-        pinBlocker_.Settle(apu + other);
-        mmc5Board_.Settle(apu);
-        s5bApuIn_.Settle(apu);
-        s5bInternal_.Settle(other);
-        s5bOut_.Settle(0.0);
-        highPass_.Settle(cartridge_ == kMmc5 || cartridge_ == k5B ? 0.0 : apu + other);
-        lowPass_.Settle(0.0);
+        ApuChanged(0);
+        CartChanged(0);
+        SettleOutputStages();
     }
 
-    [[nodiscard]] int Channels() const noexcept {
-        switch (cartridge_) {
-        case kVrc6: case k5B: return kApuChannels + 3;
-        case kMmc5: return kApuChannels + 2;
-        case kN163: return kApuChannels + n163Count_;
-        case kFds: return kApuChannels + 1;
-        default: return kApuChannels;
+    // Schedules a CPU bus write onto the console/cartridge memory map using
+    // 6502 store timing (4 CPU cycles for STA abs when the value is already in
+    // A or to an auto-incrementing streaming port; 6 cycles for LDA #imm; STA abs).
+    void Write(std::uint16_t address, std::uint8_t value) noexcept {
+        const int step = (bus_.HasLast() && (bus_.LastValue() == value || address == 0x4800 || address == 0x4088)) ? 4 : 6;
+        if (bus_.Full()) {
+            const BusWrite w = bus_.Pop();
+            WriteImmediate(w.address, w.value);
+        }
+        const std::int64_t now = apu_.Now();
+        if (bus_.CanExecuteNow(now)) {
+            WriteImmediate(address, value);
+            bus_.MarkImmediate(now, step, address, value);
+        } else {
+            bus_.Schedule(now, step, address, value);
         }
     }
 
-    [[nodiscard]] Voice VoiceOf(int channel) const noexcept {
-        switch (channel) {
-        case 0: case 1: return Voice::Pulse;
-        case 2: return Voice::Triangle;
-        case 3: return Voice::Noise;
-        default: break;
-        }
-        switch (cartridge_) {
-        case kVrc6: return channel == 6 ? Voice::Saw : Voice::Pulse;
-        case kMmc5: return Voice::Pulse;
-        case kN163: return Voice::Wave;
-        case kFds: return Voice::ModWave;
-        default: return Voice::Tone;
-        }
+    [[nodiscard]] std::uint8_t Read(std::uint16_t address) noexcept {
+        if (address == 0x4015)
+            return apu_.ReadStatus();
+        if (cartridge_ == kN163 && address >= 0x4800 && address < 0x5000)
+            return n163_.ReadData();
+        return 0xFF;
     }
 
-    // True when a pulse channel has the VRC6's eight duties.
-    [[nodiscard]] bool EightDuties(int channel) const noexcept { return cartridge_ == kVrc6 && channel >= 4 && channel < 6; }
+    // Drains initial driver boot writes, settles the output stages on the
+    // resulting rest levels (the triangle's held first step and the DMC's Bias),
+    // and aligns the sample block origin to the current cycle.
+    void FinishBoot() noexcept {
+        if (!bus_.Empty())
+            RunTo(bus_.LastCycle() + 1);
+        SettleOutputStages();
+        const nes::Clock clock = nes::kCpuClock[revision_ == kPal ? 1 : 0];
+        tb_.SetAt(apu_.Now(), clock.numerator, clock.denominator, rate_);
+        bus_.ResetTiming(apu_.Now());
+    }
 
     [[nodiscard]] std::int64_t CycleAt(int frame) const noexcept { return tb_.CycleAt(frame); }
     [[nodiscard]] double CpuHz() const noexcept { return cpuHz_; }
+    [[nodiscard]] std::int64_t Now() const noexcept { return apu_.Now(); }
 
     void RunTo(std::int64_t cycle) {
         Sink sink { this };
-        apu_.Run(cycle, sink);
         CartSink cart { this };
-        switch (cartridge_) {
-        case kVrc6: vrc6_.Run(cycle, cart); break;
-        case kMmc5: mmc5_.Run(cycle, cart); break;
-        case kN163: n163_.Run(cycle, cart); break;
-        case kFds: fds_.Run(cycle, cart); break;
-        case k5B: s5b_.Run(cycle, cart); break;
-        default: break;
+        while (!bus_.Empty() && bus_.Front().cycle < cycle) {
+            const BusWrite w = bus_.Pop();
+            if (w.cycle > apu_.Now())
+                RunChipsTo(w.cycle, sink, cart);
+            WriteImmediate(w.address, w.value);
         }
-    }
-
-    // Each channel's period register for `hz`; false when it cannot reach it.
-    [[nodiscard]] bool PeriodFor(int channel, Voice, double hz, int shape, std::int64_t& period) const noexcept {
-        if (hz <= 0.0)
-            return false;
-        const double cpu = cpuHz_;
-        switch (channel) {
-        case 0: case 1:
-            // CPU / (16 (t + 1)); t under 8 is muted by the sweep unit.
-            period = NearestCount(cpu / (16.0 * hz)) - 1;
-            return period >= 8 && period <= 0x7FF;
-        case 2:
-            // CPU / (32 (t + 1)); t under 2 is ultrasonic.
-            period = NearestCount(cpu / (32.0 * hz)) - 1;
-            return period >= 2 && period <= 0x7FF;
-        case 3:
-            period = NoiseFor(hz, shape != 0);
-            return true;
-        default:
-            break;
-        }
-        switch (cartridge_) {
-        case kVrc6:
-            period = NearestCount(cpu / ((channel == 6 ? 14.0 : 16.0) * hz)) - 1;
-            return period >= 0 && period <= 0xFFF;
-        case kMmc5:
-            // The MMC5's pulses have no sweep unit, so no low-period mute.
-            period = NearestCount(cpu / (16.0 * hz)) - 1;
-            return period >= 0 && period <= 0x7FF;
-        case kN163: {
-            // CPU x freq / (15 x channels x 65536 x length).
-            period = NearestCount(hz * 15.0 * n163Count_ * 65536.0 * N163Length() / cpu);
-            return period >= 1 && period <= 0x3FFFF;
-        }
-        case kFds:
-            // CPU x pitch / 2^22 (64 steps, the wave accumulator's 2^24
-            // advanced by 64 x pitch every 16 cycles when unmodulated).
-            period = NearestCount(hz * 4194304.0 / cpu);
-            return period >= 1 && period <= 0xFFF;
-        case k5B:
-            // CPU / (32 TP).
-            period = NearestCount(cpu / (32.0 * hz));
-            return period >= 1 && period <= 0xFFF;
-        default:
-            return false;
-        }
-    }
-
-    void Start(int channel, const ChannelSettings& s) { Write(channel, s, true); }
-    void Change(int channel, const ChannelSettings& s) { Write(channel, s, false); }
-
-    void Stop(int channel) {
-        ChannelSettings s;
-        s.period = shadow_[channel].period;
-        s.shape = shadow_[channel].shape;
-        s.mod = shadow_[channel].mod;
-        Write(channel, s, false);
-    }
-
-    // The DMC's held level ($4011), which moves the triangle and noise
-    // through the mixer.
-    void SetDmcLevel(int level) {
-        Sink sink { this };
-        apu_.Write(0x4011, static_cast<std::uint8_t>(level & 0x7F), sink);
+        if (apu_.Now() < cycle)
+            RunChipsTo(cycle, sink, cart);
     }
 
     void Render(int frames, Path path, float* left, float* right) {
@@ -311,6 +212,12 @@ public:
         // Bus 0 is the APU and every cartridge but the disk unit and the 5B;
         // bus 1 is one of those two.
         for (int i = 0; i < frames; ++i) {
+            while (fdsPending_ > 0 && fdsQueue_[0].sample <= i) {
+                fdsLowPass_.SetCoefficients(FirstOrder::Kind::LowPass, fdsLowPassCoeffs_[fdsQueue_[0].master]);
+                for (int k = 1; k < fdsPending_; ++k)
+                    fdsQueue_[k - 1] = fdsQueue_[k];
+                --fdsPending_;
+            }
             const double cart = cartridge_ == kFds ? fdsLowPass_.Process(bus[1][i]) : bus[1][i];
             double x;
             if (path == Path::Line) {
@@ -327,21 +234,16 @@ public:
             left[i] += static_cast<float>(x);
             right[i] += static_cast<float>(x);
         }
+        for (int k = 0; k < fdsPending_; ++k)
+            fdsQueue_[k].sample -= frames;
         tb_.Advance(frames);
     }
 
     [[nodiscard]] const nes::Apu& Apu() const noexcept { return apu_; }
+    [[nodiscard]] int Revision() const noexcept { return revision_; }
     [[nodiscard]] int CartridgeType() const noexcept { return cartridge_; }
 
 private:
-    struct Shadow {
-        bool active = false;
-        std::int64_t period = -1;
-        int volume = -1;
-        int shape = -1;
-        int mod = -1;
-    };
-
     struct Sink {
         Console* board;
         void operator()(std::int64_t cycle) const { board->ApuChanged(cycle); }
@@ -351,218 +253,71 @@ private:
         void operator()(std::int64_t cycle) const { board->CartChanged(cycle); }
     };
 
-    static int Clamp15(int v) noexcept { return v < 0 ? 0 : v > 15 ? 15 : v; }
-
-    // The noise period whose LFSR clock, CPU / period, is nearest `hz`
-    // times the register's cycle: 93 steps in short mode, so it plays in
-    // tune, and 32 in long mode (ours: the key picks the noise's colour).
-    [[nodiscard]] std::int64_t NoiseFor(double hz, bool shortMode) const noexcept {
-        const double target = hz * (shortMode ? 93.0 : 32.0);
-        const int region = apu_.RegionIndex();
-        int best = 0;
-        double bestRatio = 0.0;
-        for (int i = 0; i < 16; ++i) {
-            const double rate = cpuHz_ / nes::kNoisePeriod[region][i];
-            const double ratio = rate > target ? rate / target : target / rate;
-            if (bestRatio == 0.0 || ratio < bestRatio)
-                bestRatio = ratio, best = i;
-        }
-        return best;
-    }
-
-    // Wave length in samples: 32 while every channel's 32 samples fit in
-    // the RAM under the channel registers, else 16.
-    // (16 bytes and 8 of registers a channel: up to five channels.)
-    [[nodiscard]] int N163Length() const noexcept { return 24 * n163Count_ <= 128 ? 32 : 16; }
-
-    void N163Poke(int address, std::uint8_t value) {
-        CartSink cart { this };
-        n163_.Write(0xF800, static_cast<std::uint8_t>(address & 0x7F), cart);
-        n163_.Write(0x4800, value, cart);
-    }
-
-    void S5BWrite(int r, std::uint8_t value) {
-        CartSink cart { this };
-        s5b_.Write(r, value, cart);
-    }
-
-    void Write(int channel, const ChannelSettings& s, bool start) {
-        Shadow& sh = shadow_[channel];
-        const bool trigger = start || !sh.active;
-        const int volume = Clamp15(s.volume);
-        Sink sink { this };
-        CartSink cart { this };
-        switch (channel) {
-        case 0: case 1: {
-            const std::uint16_t base = static_cast<std::uint16_t>(0x4000 + 4 * channel);
-            if (trigger || volume != sh.volume || (s.shape & 3) != sh.shape)
-                apu_.Write(base, static_cast<std::uint8_t>(((s.shape & 3) << 6) | 0x30 | volume), sink);
-            if (trigger || s.period != sh.period) {
-                apu_.Write(base + 2, static_cast<std::uint8_t>(s.period & 0xFF), sink);
-                // $4003 restarts the sequencer: a driver writes it only on a
-                // trigger or when the high bits change (the click of a
-                // vibrato across them is the chip's).
-                if (trigger || (s.period >> 8) != (sh.period >> 8))
-                    apu_.Write(base + 3, static_cast<std::uint8_t>(0xF8 | ((s.period >> 8) & 7)), sink);
-            }
-            sh.shape = s.shape & 3;
-            break;
-        }
-        case 2: {
-            // No volume: the linear counter held open or closed. $4008 with
-            // its control bit set holds the counter at 127; clear and 0, it
-            // closes at the next quarter frame. Only $400B sets the reload
-            // flag that opens it again, and it leaves the phase alone.
-            const bool on = volume > 0;
-            const bool wasOn = sh.volume > 0;
-            if (trigger || on != wasOn)
-                apu_.Write(0x4008, on ? 0xFF : 0x00, sink);
-            if (trigger || s.period != sh.period)
-                apu_.Write(0x400A, static_cast<std::uint8_t>(s.period & 0xFF), sink);
-            if (trigger || (s.period >> 8) != (sh.period >> 8) || (on && !wasOn))
-                apu_.Write(0x400B, static_cast<std::uint8_t>(0xF8 | ((s.period >> 8) & 7)), sink);
-            break;
-        }
-        case 3:
-            if (trigger || volume != sh.volume)
-                apu_.Write(0x400C, static_cast<std::uint8_t>(0x30 | volume), sink);
-            if (trigger || s.period != sh.period || (s.shape & 1) != sh.shape)
-                apu_.Write(0x400E, static_cast<std::uint8_t>(((s.shape & 1) << 7) | (s.period & 15)), sink);
-            if (trigger)
-                apu_.Write(0x400F, 0xF8, sink);
-            sh.shape = s.shape & 1;
-            break;
-        default:
-            WriteCartridge(channel, s, trigger, cart);
-            break;
-        }
-        sh.active = true;
-        sh.period = s.period;
-        sh.volume = volume;
-        sh.mod = s.mod;
-    }
-
-    void WriteCartridge(int channel, const ChannelSettings& s, bool trigger, CartSink& cart) {
-        Shadow& sh = shadow_[channel];
-        const int volume = Clamp15(s.volume);
-        const int k = channel - kApuChannels;
+    void RunChipsTo(std::int64_t cycle, Sink& sink, CartSink& cart) {
+        apu_.Run(cycle, sink);
         switch (cartridge_) {
-        case kVrc6: {
-            const std::uint16_t base = static_cast<std::uint16_t>(0x9000 + 0x1000 * k);
-            if (k < 2) {
-                const int duty = s.shape & 7;
-                if (trigger || volume != sh.volume || duty != sh.shape)
-                    vrc6_.Write(base, static_cast<std::uint8_t>((duty << 4) | volume), cart);
-                sh.shape = duty;
-            } else {
-                // The saw's "volume" is its accumulator rate; above 42 it
-                // overflows (NESdev: distorts), so the common 15 maps to 42.
-                const int rate = (volume * 42 + 7) / 15;
-                if (trigger || volume != sh.volume)
-                    vrc6_.Write(base, static_cast<std::uint8_t>(rate), cart);
-            }
-            if (trigger || s.period != sh.period) {
-                vrc6_.Write(base + 1, static_cast<std::uint8_t>(s.period & 0xFF), cart);
-                vrc6_.Write(base + 2, static_cast<std::uint8_t>(0x80 | ((s.period >> 8) & 15)), cart);
-            }
-            break;
+        case kVrc6: vrc6_.Run(cycle, cart); break;
+        case kMmc5: mmc5_.Run(cycle, cart); break;
+        case kN163: n163_.Run(cycle, cart); break;
+        case kFds: fds_.Run(cycle, cart); break;
+        case k5B: s5b_.Run(cycle, cart); break;
+        default: break;
         }
-        case kMmc5: {
-            const std::uint16_t base = static_cast<std::uint16_t>(0x5000 + 4 * k);
-            if (trigger || volume != sh.volume || (s.shape & 3) != sh.shape)
-                mmc5_.Write(base, static_cast<std::uint8_t>(((s.shape & 3) << 6) | 0x30 | volume), cart);
-            if (trigger || s.period != sh.period) {
-                mmc5_.Write(base + 2, static_cast<std::uint8_t>(s.period & 0xFF), cart);
-                if (trigger || (s.period >> 8) != (sh.period >> 8))
-                    mmc5_.Write(base + 3, static_cast<std::uint8_t>(0xF8 | ((s.period >> 8) & 7)), cart);
-            }
-            sh.shape = s.shape & 3;
-            break;
+    }
+
+    void WriteImmediate(std::uint16_t address, std::uint8_t value) noexcept {
+        if (address >= 0x4000 && address <= 0x4017) {
+            Sink sink { this };
+            apu_.Write(address, value, sink);
+            return;
         }
-        case kN163: {
-            // Channel k is the chip's channel 8 - k, registers at
-            // $78 - 8k; its wave at k times the wave's bytes.
-            const int reg = 0x78 - 8 * k;
-            const int length = N163Length();
-            const int shape = s.shape % kWaveCount;
-            // The chip reads its RAM as it plays, so a held note takes a new
-            // wave as it is written.
-            if (shape != sh.shape) {
-                for (int i = 0; i < length / 2; ++i) {
-                    const int step = 32 / length;
-                    const int a = kWaves[shape].samples[(2 * i) * step];
-                    const int b = kWaves[shape].samples[(2 * i + 1) * step];
-                    // Low nibble first (NESdev).
-                    N163Poke(k * (length / 2) + i, static_cast<std::uint8_t>(a | (b << 4)));
-                }
-                N163Poke(reg + 6, static_cast<std::uint8_t>(k * length));
-                sh.shape = shape;
-            }
-            if (trigger || s.period != sh.period) {
-                N163Poke(reg + 0, static_cast<std::uint8_t>(s.period & 0xFF));
-                N163Poke(reg + 2, static_cast<std::uint8_t>((s.period >> 8) & 0xFF));
-                N163Poke(reg + 4, static_cast<std::uint8_t>(((256 - length) & 0xFC) | ((s.period >> 16) & 3)));
-            }
-            if (trigger) {
-                N163Poke(reg + 1, 0);
-                N163Poke(reg + 3, 0);
-                N163Poke(reg + 5, 0);
-            }
-            if (trigger || volume != sh.volume) {
-                const std::uint8_t high = reg == 0x78 ? static_cast<std::uint8_t>((n163Count_ - 1) << 4) : 0;
-                N163Poke(reg + 7, static_cast<std::uint8_t>(high | volume));
-            }
+        CartSink cart { this };
+        switch (cartridge_) {
+        case kVrc6:
+            if (address >= 0x9000 && address < 0xC000)
+                vrc6_.Write(address, value, cart);
             break;
-        }
-        case kFds: {
-            const int shape = s.shape % kWaveCount;
-            // The wave is writable while $4089 holds the output (NESdev), so
-            // a held note takes a new one too.
-            if (shape != sh.shape) {
-                fds_.Write(0x4089, 0x80, cart);
-                for (int i = 0; i < 64; ++i)
-                    fds_.Write(static_cast<std::uint16_t>(0x4040 + i), kWaves64[shape][i], cart);
-                fds_.Write(0x4089, 0x00, cart);
-                sh.shape = shape;
-            }
-            if (trigger || volume != sh.volume)
-                fds_.Write(0x4080, static_cast<std::uint8_t>(0x80 | ((volume * 32 + 7) / 15)), cart);
-            // The modulator at the carrier's own rate (its accumulator runs
-            // on the same scale), depth from the part's mod (0-63).
-            const int depth = s.mod < 0 ? 0 : s.mod > 63 ? 63 : s.mod;
-            if (trigger) {
-                fds_.Write(0x4087, 0x80, cart);
-                for (int i = 0; i < 32; ++i)
-                    fds_.Write(0x4088, kModTable[i], cart);
-                fds_.Write(0x4085, 0x00, cart);
-            }
-            if (trigger || depth != sh.mod)
-                fds_.Write(0x4084, static_cast<std::uint8_t>(0x80 | depth), cart);
-            if (trigger || s.period != sh.period) {
-                fds_.Write(0x4082, static_cast<std::uint8_t>(s.period & 0xFF), cart);
-                fds_.Write(0x4083, static_cast<std::uint8_t>((s.period >> 8) & 15), cart);
-                fds_.Write(0x4086, static_cast<std::uint8_t>(s.period & 0xFF), cart);
-                fds_.Write(0x4087, static_cast<std::uint8_t>((s.period >> 8) & 15), cart);
-            }
+        case kMmc5:
+            if (address >= 0x5000 && address <= 0x5015)
+                mmc5_.Write(address, value, cart);
             break;
-        }
-        case k5B: {
-            if (trigger || s.period != sh.period) {
-                S5BWrite(2 * k, static_cast<std::uint8_t>(s.period & 0xFF));
-                S5BWrite(2 * k + 1, static_cast<std::uint8_t>((s.period >> 8) & 15));
-            }
-            if (trigger || volume != sh.volume)
-                S5BWrite(8 + k, static_cast<std::uint8_t>(volume));
-            if (trigger) {
-                // Tone on (bit k clear), noise off, in the shared mixer.
-                const std::uint8_t mixer = s5b_.Register(7);
-                S5BWrite(7, static_cast<std::uint8_t>((mixer & ~(1 << k)) | (8 << k)));
-            }
+        case kN163:
+            if ((address >= 0x4800 && address < 0x5000) || (address >= 0xE000 && address < 0xE800) || address >= 0xF800)
+                n163_.Write(address, value, cart);
             break;
-        }
+        case kFds:
+            if (address == 0x4023 || (address >= 0x4040 && address <= 0x408A))
+                fds_.Write(address, value, cart);
+            break;
+        case k5B:
+            if (address >= 0xC000 && address < 0xE000)
+                s5bAddr_ = value;
+            else if (address >= 0xE000 && s5bAddr_ < 16)
+                s5b_.Write(s5bAddr_, value, cart);
+            break;
         default:
             break;
         }
+    }
+
+    void SettleOutputStages() noexcept {
+        // Ours: a machine chosen is heard as one that has stood at rest, its
+        // output stages settled on the level the writes above leave (the
+        // triangle held on its first step, the DMC on Bias), not as one
+        // switched on that moment, whose step from nothing would thump
+        // through the Pin blocker on every reset.
+        const double apu = mix_.Land(0), other = mix_.Land(1);
+        fdsMaster_ = fds_.MasterVolume() & 3;
+        fdsPending_ = 0;
+        fdsLowPass_.SetCoefficients(FirstOrder::Kind::LowPass, fdsLowPassCoeffs_[fdsMaster_]);
+        fdsLowPass_.Settle(other);
+        pinBlocker_.Settle(apu + other);
+        mmc5Board_.Settle(apu);
+        s5bApuIn_.Settle(apu);
+        s5bInternal_.Settle(other);
+        s5bOut_.Settle(0.0);
+        highPass_.Settle(cartridge_ == kMmc5 || cartridge_ == k5B ? 0.0 : apu + other);
+        lowPass_.Settle(0.0);
     }
 
     void ApuChanged(std::int64_t cycle) noexcept {
@@ -581,6 +336,7 @@ private:
     }
 
     void CartChanged(std::int64_t cycle) noexcept {
+        const std::int64_t position = tb_.Position(cycle, StepBuffer::kSubBits);
         double level = 0.0;
         int bus = 0;
         switch (cartridge_) {
@@ -588,14 +344,22 @@ private:
             level = -(kPulse15 / 15.0) * (vrc6_.Out(0) + vrc6_.Out(1) + vrc6_.Out(2));
             break;
         case kMmc5:
-            level = -(kPulse15 / 15.0) * (mmc5_.Out(0) + mmc5_.Out(1));
+            level = -(kPulse15 / 15.0) * (mmc5_.Out(0) + mmc5_.Out(1)) - kMmc5PcmStep * mmc5_.Out(2);
             break;
         case kN163:
             level = n163_.Out() * kN163Step;
             break;
         case kFds: {
             static constexpr double kMaster[4] = { 1.0, 2.0 / 3.0, 2.0 / 4.0, 2.0 / 5.0 };
-            level = fds_.Out() * kFdsStep * kMaster[fds_.MasterVolume()];
+            const int m = fds_.MasterVolume() & 3;
+            if (m != fdsMaster_) {
+                fdsMaster_ = m;
+                const int sample = static_cast<int>(position >> StepBuffer::kSubBits) + blep::kDelay;
+                if (fdsPending_ == kFdsQueue)
+                    --fdsPending_;
+                fdsQueue_[fdsPending_++] = { sample, m };
+            }
+            level = fds_.Out() * kFdsStep * kMaster[m];
             bus = 1;
             break;
         }
@@ -609,9 +373,11 @@ private:
         }
         float levels[2] = { 0.0f, 0.0f };
         levels[bus] = static_cast<float>(level);
-        mix_.Set(1, tb_.Position(cycle, StepBuffer::kSubBits), levels);
+        mix_.Set(1, position, levels);
     }
 
+    // MMC5 $5011 PCM step equivalent to 2A03 $4011 at 127 (inverted).
+    static constexpr double kMmc5PcmStep = (159.79 / (22638.0 / 127.0 + 100.0)) / 127.0;
     // 12 dB over the APU's loudest square, on 225 steps peak to peak.
     static constexpr double kN163Step = kPulse15 * 3.9810717055349722 / 225.0;
     // 2.4 times the APU square, on the wave's 63 x 32 peak to peak.
@@ -658,10 +424,15 @@ private:
         return x < 0.0 ? -y : y;
     }
 
+    static constexpr int kFdsQueue = 32;
+    struct FdsMasterEvent {
+        int sample;
+        int master;
+    };
+
     int rate_ = 48000;
     int revision_ = kFrontLoader;
     int cartridge_ = kNone;
-    int n163Count_ = 4;
     double cpuHz_ = 19687500.0 / 11.0;
     nes::Apu apu_;
     famicom::Vrc6 vrc6_;
@@ -669,12 +440,16 @@ private:
     famicom::Namco163 n163_;
     famicom::Fds fds_;
     ay::Chip s5b_;
+    std::uint8_t s5bAddr_ = 0;
     Timebase tb_;
+    BusWriteQueue<> bus_;
     StepMix<2, 2> mix_;
     FirstOrder pinBlocker_, fdsLowPass_, highPass_, lowPass_;
+    FirstOrder::Coefficients fdsLowPassCoeffs_[4] {};
     FirstOrder mmc5Board_, s5bApuIn_, s5bInternal_, s5bOut_;
     double curve5B_[kCurveSteps + 1] {};
-    Shadow shadow_[kMaxChannels];
+    int fdsMaster_ = 0, fdsPending_ = 0;
+    FdsMasterEvent fdsQueue_[kFdsQueue] {};
 };
 
 } // namespace protocodus::reboot

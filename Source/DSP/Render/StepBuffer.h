@@ -64,6 +64,17 @@ public:
         std::memset(diff_ + blep::kTaps, 0, sizeof(std::int64_t) * static_cast<std::size_t>(frames));
     }
 
+    // Writes each sample's band-limited step increment (without integrating into
+    // sum_) and advances the kernel tail, for feeding leaky/RC residual decays
+    // without unbounded accumulator growth.
+    void ReadDelta(float* out, int frames, double gain = 1.0) noexcept {
+        const double scale = gain / static_cast<double>(std::int64_t { 1 } << (kLevelBits + blep::kUnitBits + kFracBits));
+        for (int i = 0; i < frames; ++i)
+            out[i] = static_cast<float>(static_cast<double>(diff_[i]) * scale);
+        std::memmove(diff_, diff_ + frames, sizeof(std::int64_t) * blep::kTaps);
+        std::memset(diff_ + blep::kTaps, 0, sizeof(std::int64_t) * static_cast<std::size_t>(frames));
+    }
+
     // Lands every step in flight at once, and returns the level it leaves.
     double Land() noexcept {
         for (std::int64_t& d : diff_) {

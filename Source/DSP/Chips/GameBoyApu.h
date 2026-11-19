@@ -11,12 +11,14 @@
 // Out() gives each channel's digital output (0-15), DacOn() whether its DAC
 // is on; the board turns those into analog levels (Boards/Handheld.h).
 //
-// Not modelled, because no source in hand states them: the DAC's fade to 0
-// when it is turned off (Pan Docs: "not entirely deterministic and varies
-// between models"), the "zombie" volume writes other than the one Pan Docs
-// calls consistent on every unit and the wave channel's start-up delay. A
-// disabled channel's generators stand still until it is triggered again,
+// Not modelled, because no source in hand states them: "zombie" volume
+// writes other than the consistent CGB-04 / $08 rules Pan Docs states.
+// A disabled channel's generators stand still until it is triggered again,
 // its frequency timer holding the count it stopped on.
+//
+// Reported additions (Lior Halphon's SameBoy, Expat/MIT license, read for the
+// timing rules it states, no code copied): CH3's 6-T-cycle trigger delay and
+// the 2-T-cycle DMG Wave RAM retrigger corruption window.
 
 #include "Lfsr.h"
 #include "Timer.h"
@@ -59,6 +61,8 @@ public:
     void Reset(Model model) noexcept {
         *this = Apu {};
         model_ = model;
+        regs_[0x14] = nr50_;
+        regs_[0x15] = nr51_;
         Update();
     }
 
@@ -90,8 +94,8 @@ public:
                     s.timer.due += s.timer.period;
                 }
             if (wave_.live && wave_.timer.due == now_) {
-                WaveStep(1);
                 wave_.timer.due += wave_.timer.period;
+                WaveStep(1);
             }
             if (noise_.live && noise_.timer.due == now_) {
                 noise_.shift = NoiseStep(noise_.shift, noise_.shortMode);
@@ -108,7 +112,15 @@ public:
     void Write(std::uint16_t address, std::uint8_t value, Sink& sink) {
         CatchUpAll();
         if (address >= 0xFF30 && address <= 0xFF3F) {
-            waveRam_[address - 0xFF30] = value;
+            // Pan Docs, Audio Registers ($FF30-$FF3F): while CH3 is active, CGB
+            // redirects Wave RAM access to the byte CH3 is playing, while DMG
+            // ignores accesses outside the 2-T-cycle read window.
+            if (!wave_.on)
+                waveRam_[address - 0xFF30] = value;
+            else if (model_ == Model::Cgb)
+                waveRam_[wave_.position >> 1] = value;
+            else if (now_ - wave_.lastRead < 2)
+                waveRam_[wave_.position >> 1] = value;
         } else if (address == 0xFF26) {
             const bool on = (value & 0x80) != 0;
             if (!on && power_)
@@ -123,27 +135,46 @@ public:
             power_ = on;
         } else if (power_) {
             WriteRegister(address, value);
+            if (address >= 0xFF10 && address <= 0xFF25)
+                regs_[address - 0xFF10] = value;
+        } else if (model_ == Model::Dmg) {
+            // Pan Docs, NR52: on DMG, length counters remain writable while powered off.
+            if (address == 0xFF11 || address == 0xFF16)
+                square_[address == 0xFF11 ? 0 : 1].length.remaining = 64 - (value & 0x3F);
+            else if (address == 0xFF1B)
+                wave_.length.remaining = 256 - value;
+            else if (address == 0xFF20)
+                noise_.length.remaining = 64 - (value & 0x3F);
         }
         if (Update())
             sink(now_);
     }
 
-    // Ours, not the hardware's: `extension` more counts on the wave
-    // channel's 11-bit period counter, so the keys under its lowest note
-    // (32 Hz) sound at their own pitch (Boards/Handheld.h). 0 is the chip.
-    template <class Sink>
-    void SetWaveExtension(int extension, Sink& sink) {
+    // A CPU read from $FF10-$FF3F at Now() (Pan Docs, Audio Registers).
+    [[nodiscard]] std::uint8_t Read(std::uint16_t address) noexcept {
         CatchUpAll();
-        wave_.extension = extension;
-        wave_.SetPeriod(wave_.period);
-        if (Update())
-            sink(now_);
-    }
-
-    // Wave RAM, as a sound driver loads it with the DAC off.
-    void LoadWave(const std::uint8_t (&bytes)[16]) noexcept {
-        for (int i = 0; i < 16; ++i)
-            waveRam_[i] = bytes[i];
+        if (address >= 0xFF30 && address <= 0xFF3F) {
+            if (!wave_.on)
+                return waveRam_[address - 0xFF30];
+            if (model_ == Model::Cgb)
+                return waveRam_[wave_.position >> 1];
+            return (now_ - wave_.lastRead < 2) ? waveRam_[wave_.position >> 1] : 0xFF;
+        }
+        if (address == 0xFF26) {
+            return static_cast<std::uint8_t>((power_ ? 0x80 : 0x00) | 0x70 | (square_[0].on ? 1 : 0)
+                                             | (square_[1].on ? 2 : 0) | (wave_.on ? 4 : 0) | (noise_.on ? 8 : 0));
+        }
+        if (address >= 0xFF10 && address <= 0xFF25) {
+            static constexpr std::uint8_t kReadMask[22] = {
+                0x80, 0x3F, 0x00, 0xFF, 0xBF,
+                0xFF, 0x3F, 0x00, 0xFF, 0xBF,
+                0x7F, 0xFF, 0x9F, 0xFF, 0xBF,
+                0xFF, 0xFF, 0x00, 0x00, 0xBF,
+                0x00, 0x00,
+            };
+            return static_cast<std::uint8_t>(regs_[address - 0xFF10] | kReadMask[address - 0xFF10]);
+        }
+        return 0xFF;
     }
 
 private:
@@ -151,6 +182,7 @@ private:
         std::uint8_t reg = 0;                  // NRx2
         std::uint8_t volume = 0, timer = 0;
         bool running = false;
+        bool halted = false;
         [[nodiscard]] int Pace() const noexcept { return reg & 7; }
         [[nodiscard]] bool Up() const noexcept { return (reg & 8) != 0; }
         void Trigger(bool nextStepClocksEnvelope) noexcept {
@@ -159,6 +191,7 @@ private:
             // trigger just before an envelope step reloads one more.
             timer = static_cast<std::uint8_t>((Pace() ? Pace() : 8) + (nextStepClocksEnvelope ? 1 : 0));
             running = Pace() != 0;
+            halted = false;
         }
         void Clock() noexcept {
             if (!running || Pace() == 0)
@@ -169,8 +202,10 @@ private:
                     ++volume;
                 else if (!Up() && volume > 0)
                     --volume;
-                else
+                else {
                     running = false;
+                    halted = true;
+                }
             }
         }
     };
@@ -206,13 +241,13 @@ private:
         std::uint8_t level = 0, position = 0, sample = 0;   // NR32 bits 6-5
         std::uint8_t buffer = 0;                  // the sample buffer: the last byte read
         std::uint16_t period = 0;
-        int extension = 0;                        // ours: SetWaveExtension
+        std::int64_t lastRead = -10;
         Length length;
         Divider timer { 0, 2 * 2048 };
         bool live = false;
         void SetPeriod(int p) noexcept {
             period = static_cast<std::uint16_t>(p & 0x7FF);
-            timer.period = 2 * (2048 - period + extension);   // 2097152 Hz divider clock
+            timer.period = 2 * (2048 - period);   // 2097152 Hz divider clock
         }
     };
 
@@ -261,7 +296,10 @@ private:
         }
         case 0xFF12: case 0xFF17: {
             Square& s = square_[address == 0xFF12 ? 0 : 1];
-            Zombie(s.envelope, value);
+            if (s.on)
+                Zombie(model_, s.envelope, value);
+            else
+                s.envelope.reg = value;
             if ((value & 0xF8) == 0)
                 s.on = false;
             break;
@@ -304,7 +342,10 @@ private:
             noise_.length.remaining = 64 - (value & 0x3F);
             break;
         case 0xFF21:
-            Zombie(noise_.envelope, value);
+            if (noise_.on)
+                Zombie(model_, noise_.envelope, value);
+            else
+                noise_.envelope.reg = value;
             if ((value & 0xF8) == 0)
                 noise_.on = false;
             break;
@@ -327,13 +368,21 @@ private:
         }
     }
 
-    // Pan Docs, Obscure Behavior ("zombie" mode): the one write every unit
-    // agrees on. Writing $x8 (increase, pace 0) while the channel plays with
-    // pace 0 in increase mode adds 1 to the volume, modulo 16. Any other write
-    // only stores the register, which the next trigger reads.
-    static void Zombie(Envelope& e, std::uint8_t value) noexcept {
-        if ((e.reg & 0x0F) == 0x08 && (value & 0x0F) == 0x08)
+    // Pan Docs, Obscure Behavior ("zombie" mode): CGB-04's consistent rules on
+    // CGB, and the universally consistent $x8 increment on DMG.
+    static void Zombie(Model model, Envelope& e, std::uint8_t value) noexcept {
+        if (model == Model::Cgb) {
+            int v = e.volume;
+            if ((e.reg & 7) == 0 && !e.halted)
+                v += 1;
+            else if (!(e.reg & 8))
+                v += 2;
+            if ((e.reg ^ value) & 8)
+                v = 16 - v;
+            e.volume = static_cast<std::uint8_t>(v & 15);
+        } else if ((e.reg & 0x0F) == 0x08 && (value & 0x0F) == 0x08) {
             e.volume = static_cast<std::uint8_t>((e.volume + 1) & 15);
+        }
         e.reg = value;
     }
 
@@ -388,7 +437,9 @@ private:
         LengthTrigger(wave_.length, 256);
         // Pan Docs, Obscure Behavior: on the original handheld a trigger as
         // the channel reads a byte rewrites the start of wave RAM.
-        if (model_ == Model::Dmg && wave_.on && wave_.timer.due == now_) {
+        // SameBoy (MIT): the DMG bug triggers in the 2-T-cycle APU tick window
+        // before the read, and on a read-tick collision reloads byte 0.
+        if (model_ == Model::Dmg && wave_.on && wave_.timer.due - now_ <= 2) {
             const int byte = ((wave_.position + 1) & 31) >> 1;
             if (byte < 4) {
                 waveRam_[0] = waveRam_[byte];
@@ -397,13 +448,16 @@ private:
                 for (int j = 0; j < 4; ++j)
                     waveRam_[j] = waveRam_[base + j];
             }
+            if (wave_.timer.due == now_)
+                wave_.buffer = waveRam_[0];
         }
         // Pan Docs, Obscure Behavior: a trigger does not read wave RAM, so
         // the first sample is "the previous one still in the high nibble of
         // the sample buffer", and the next is index 1.
+        // Reported (SameBoy, MIT): hardware delays the first sample step by 6 T-cycles.
         wave_.position = 0;
         wave_.sample = wave_.buffer >> 4;
-        wave_.timer.due = now_ + wave_.timer.period;
+        wave_.timer.due = now_ + wave_.timer.period + 6;
         wave_.on = wave_.dac;
     }
 
@@ -482,6 +536,7 @@ private:
         wave_.position = static_cast<std::uint8_t>((wave_.position + k) & 31);
         wave_.buffer = waveRam_[wave_.position >> 1];
         wave_.sample = (wave_.position & 1) ? (wave_.buffer & 0x0F) : (wave_.buffer >> 4);
+        wave_.lastRead = wave_.timer.due - wave_.timer.period;
     }
 
     void CatchUpAll() noexcept {
@@ -503,11 +558,17 @@ private:
     }
 
     // Pan Docs, NR52: turning the APU off clears its registers and the duty
-    // steps; wave RAM is kept.
+    // steps; wave RAM is kept, and on DMG the length counters survive too.
     void PowerOff() noexcept {
         std::uint8_t ram[16];
         for (int i = 0; i < 16; ++i)
             ram[i] = waveRam_[i];
+        const int len[4] = {
+            square_[0].length.remaining,
+            square_[1].length.remaining,
+            wave_.length.remaining,
+            noise_.length.remaining,
+        };
         const std::int64_t now = now_, divDue = divDue_;
         const int divStep = divStep_;
         const Model model = model_;
@@ -517,6 +578,12 @@ private:
         power_ = false;
         for (int i = 0; i < 16; ++i)
             waveRam_[i] = ram[i];
+        if (model_ == Model::Dmg) {
+            square_[0].length.remaining = len[0];
+            square_[1].length.remaining = len[1];
+            wave_.length.remaining = len[2];
+            noise_.length.remaining = len[3];
+        }
     }
 
     bool Update() noexcept {
@@ -582,6 +649,7 @@ private:
     std::uint16_t shadow_ = 0;
     bool sweepEnabled_ = false, sweepNegated_ = false;
     std::uint8_t nr50_ = 0x77, nr51_ = 0xFF, lastNr50_ = 0x77, lastNr51_ = 0xFF;
+    std::uint8_t regs_[22] {};
     std::uint8_t waveRam_[16] {};
     std::uint8_t out_[kChannels] {};
     bool dac_[kChannels] {};

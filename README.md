@@ -29,14 +29,14 @@ on four consoles.
 
 | # | Preset | Demo | Length | Peak |
 | --- | --- | --- | --- | --- |
-| 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -11.6 dBFS |
-| 2 | Wave Bass | [02-wave-bass.wav](Docs/audio/02-wave-bass.wav) | 8.4 s | -13.1 dBFS |
-| 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -17.2 dBFS |
+| 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -11.9 dBFS |
+| 2 | Wave Bass | [02-wave-bass.wav](Docs/audio/02-wave-bass.wav) | 8.4 s | -12.8 dBFS |
+| 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -15.5 dBFS |
 | 4 | Static Snare | [04-static-snare.wav](Docs/audio/04-static-snare.wav) | 10.8 s | -15.5 dBFS |
-| 5 | Triangle Bass | [05-triangle-bass.wav](Docs/audio/05-triangle-bass.wav) | 8.3 s | -13.2 dBFS |
-| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -16.8 dBFS |
-| 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -18.6 dBFS |
-| 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -8.1 dBFS |
+| 5 | Triangle Bass | [05-triangle-bass.wav](Docs/audio/05-triangle-bass.wav) | 8.3 s | -17.9 dBFS |
+| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -19.5 dBFS |
+| 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -19.2 dBFS |
+| 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -8.3 dBFS |
 
 <!-- audio-demos-end -->
 
@@ -47,6 +47,40 @@ Tools/update_readme_blocks.py demos --readme README.md --manifest
 WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
+
+### 0.5.0 — 2026-11-19 — hardware blackbox, CPU bus drivers and analog fidelity
+
+- **Strict hardware-blackbox / sound-driver split.** `Chips/` and `Boards/`
+  emulate only the physical silicon, DACs, mixers, CPU address decoding, and
+  analog stages (`Handheld` and `Console` accept only CPU `Write(addr, val)` /
+  `Read(addr)`, `FinishBoot()`, `RunTo(cycle)`, and `Render()`). Multi-register
+  updates queue with SM83 (`8`/`12` T-cycle) and 6502 (`4`/`6` CPU cycle) bus
+  write spacing, including Sunsoft 5B `$C000`/`$E000` register latching. All
+  musical translation now lives above the bus in `Driver/` (`HandheldDriver` and
+  `ConsoleDriver`).
+- **Handheld chip and analog authenticity.** Added CH3's 6-T-cycle trigger
+  delay, the 2-T-cycle DMG Wave RAM retrigger corruption window with byte-0
+  reload, active CH3 Wave RAM read/write lock (DMG) and played-byte redirect
+  (CGB), consistent CGB-04/DMG zombie volume writes guarded by `channel.on` and
+  envelope halt, DMG `NR52=0` length preservation and powered-off length
+  writes, full register readback, and a `50 us` BLEP-aligned DAC turn-off
+  fade passing continuously through the coupling capacitor and Color amplifier
+  on Line.
+- **Console chip and board authenticity.** Added `$4015` / `$4800` readback,
+  VRC6 sawtooth 14-step accumulator reset on `$B002` `E=0`, rainwarrior RP2C33
+  FDS negative-bias modulator rounding with immediate `latchedGain_` tracking
+  and lazy `CatchUp()`, MMC5 `$5011` 8-bit PCM DAC connection into the mixer,
+  and FDS `$4089` master-volume low-pass corner switching (`2 / 3 / 4 / 5 kHz`)
+  preserving filter state.
+- **Authentic driver techniques across the full compass.** Sub-32 Hz Handheld
+  CH3 (`A0`–`B0`) now plays through a master-cycle `NR32` timer ISR over
+  all-`$FF` Wave RAM rather than modifying chip silicon; Handheld `< 64 Hz`
+  Pulse fallback loads exact CH3 Pulse duty tables; Noise retriggers on 15/7-bit
+  LFSR width change mid-note; FDS and 8-channel Namco 163 fold harmonic cycles
+  into wavetable RAM up to C8 without falling back to the APU Triangle; native
+  volume resolution (`0..32` FDS, `0..42` VRC6 sawtooth, `0..3` CH3, `0..1`
+  Triangle, `0..15` others) replaces uniform 4-bit truncation; N163 streams via
+  `$F800` auto-increment bursts and 5B caches its `$C000` register latch.
 
 ### 0.4.0 — 2026-11-18 — one voice, two machines, envelopes in time
 
@@ -169,22 +203,23 @@ There is no build to download yet.
 
 ## How it works
 
-**The signal path.** A key becomes register writes on the cycle its MIDI
-event falls on. The chip core runs from event to event on its master clock
-and gives each channel's DAC code whenever one changes; the board turns the
-codes into levels with its DAC and mixer, which is a list of steps in time,
-exact to the clock cycle. The steps are band-limited to the host's rate, then
-pass either the board's own output stage (**Line**) or only a DC blocker
-(**Pin**), then Volume and the portfolio's output stage. A machine chosen
-starts as one that has stood at rest, its output stage settled on the level
-the console's held triangle step and DMC leave, so a reset or a new Bias at
-reset does not thump; a Bias moved while playing steps as a $4011 write
-does.
+**The signal path.** A key becomes legal register writes pushed onto a machine's
+CPU bus on the cycle its MIDI event (or timer/VBlank frame) falls on, spaced by
+SM83 (`8`/`12` T-cycle) or 6502 (`4`/`6` CPU cycle) store timing. The board's
+chips run from event to event on their master clocks and emit each channel's
+DAC code whenever one changes; the board turns the codes into levels with its
+DAC and mixer (and per-channel `50 us` DAC-off decay on Handheld Line) as
+band-limited steps in time, exact to the clock cycle. The steps pass either the
+board's own output stage (**Line**) or only a DC blocker (**Pin**), then the
+part's level trim, Volume and the portfolio's output stage. A machine chosen
+starts as one that has stood at rest, its output stages settled on the resting
+levels left after initial driver boot writes, so a reset or a new Bias at reset
+does not thump; a Bias moved while playing steps as a `$4011` write does.
 
 ```
-keys ─▶ playing layer ─▶ register writes at chip cycles ─▶ chip core (integer, event to event)
-     ─▶ DAC codes ─▶ board DAC and mixer ─▶ steps ─▶ band-limited at the host rate
-     ─▶ Pin: 5 Hz DC blocker │ Line: the machine's output stage ─▶ Volume ─▶ limiter at -1.5 dBFS
+keys ─▶ sound driver ─▶ CPU bus writes (SM83 / 6502) ─▶ board blackbox (chips + DACs + mixer)
+     ─▶ steps ─▶ band-limited at the host rate ─▶ Pin: 5 Hz DC blocker │ Line: output stage
+     ─▶ trim ─▶ Volume ─▶ limiter at -1.5 dBFS
 ```
 
 **Where every value comes from.** Each mechanism carries one of these tags
@@ -201,26 +236,29 @@ be replaced when a source arrives.
 | estimate | a typical part or an engineering judgement, with its reasoning beside it |
 
 No die-level netlist was read, no emulator's code was copied, and no
-copyleft or non-commercial source was read. Ayumi (MIT), MAME's ay8910
-(BSD-3-Clause) and the documents above were read for the rules they state;
-the code is our own.
+copyleft or non-commercial source was read. SameBoy (Expat/MIT), Ayumi (MIT),
+MAME's ay8910 (BSD-3-Clause) and the documents above were read for the
+hardware rules they state; the code is our own.
 
 ### The handheld (Game Boy, Game Boy Color)
 
-- **Chip (spec):** Pan Docs (CC0): two pulses with four duties, the first
-  with its period sweep, a 32-sample 4-bit wave channel, a noise channel
-  with its 15- and 7-bit LFSR, the length counters, volume envelopes and
-  the 512 Hz frame sequencer on the gbdev wiki's step map, on the
-  4194304 Hz clock. Quirks Pan Docs states for each model: the first duty
-  step after the first trigger plays as 0, the duty position survives a
-  trigger, a pulse trigger keeps the low two bits of its frequency timer, a
-  wave trigger plays the sample buffer's high nibble before index 1, the
-  "zombie" volume write every unit agrees on ($08: one step up).
-  Revisions: the original (DMG) and the Color (CGB).
-- **DACs and mixer (spec):** a DAC on maps 0 to 15 to analog +1 to -1, off
-  gives 0; NR51 sends channels to each side and NR50 scales the sides.
-- **Line (reported):** Pan Docs' coupling capacitor, held while every DAC
-  is off, at corners fitted to Herbert Weixelbaum's recordings
+- **Chip (spec, CH3 delay & DMG corruption window reported):** Pan Docs
+  (CC0): two pulses with four duties, the first with its period sweep, a
+  32-sample 4-bit wave channel, a noise channel with its 15- and 7-bit LFSR,
+  length counters, volume envelopes and the 512 Hz frame sequencer on the gbdev
+  wiki's step map, clocked at 4194304 Hz. Quirks: the first duty step after the
+  first trigger plays as 0, duty position survives a trigger, pulse triggers
+  keep the low two bits of the frequency timer, wave triggers play the previous
+  sample buffer's high nibble before index 1, active CH3 Wave RAM writes/reads
+  are locked (DMG 2-T-cycle window) or redirected (CGB), CGB-04/DMG zombie
+  volume writes (`NRx2`), DMG `NR52=0` length preservation, and SameBoy-reported
+  CH3 6-T-cycle trigger delay and 2-T-cycle DMG Wave RAM retrigger corruption
+  window. Revisions: the original (DMG) and the Color (CGB).
+- **DACs and mixer (spec, 50 us decay reported):** a DAC on maps 0 to 15 to
+  analog +1 to -1, off decays toward 0 over 50 us on Line; NR51 sends channels
+  to each side and NR50 scales the sides.
+- **Line (reported):** Pan Docs' coupling capacitor, driven continuously (with
+  the 50 us DAC-off decay) at corners fitted to Herbert Weixelbaum's recordings
   (herbertweixelbaum.com, "game boy sound comparison": each machine at its
   highest volume into an audio interface, playing a 50 % pulse at 65.41 Hz,
   shown as waveforms; `Tools/fit_handheld_line.py`). The original fits one
@@ -237,11 +275,11 @@ the code is our own.
 
 - **Chip (spec):** the NESdev Wiki's APU pages: two pulses with sweep, the
   triangle, the noise channel's two modes, the DMC's held level, the
-  envelopes, length counters and the frame counter, in CPU cycles at the
-  NTSC 1789773 Hz (19687500 / 11) or the PAL 1662607 Hz, with the PAL
-  2A07's own noise and DMC period tables. A pulse period change that crosses the high
-  bits writes $4003 or $4007, as a driver must, and the phase reset it
-  forces is heard.
+  envelopes, length counters, `$4015` readback and the frame counter, in CPU
+  cycles at the NTSC 1789773 Hz (19687500 / 11) or the PAL 1662607 Hz, with
+  the PAL 2A07's own noise and DMC period tables. A pulse period change that
+  crosses the high bits writes $4003 or $4007, as a driver must, and the phase
+  reset it forces is heard.
 - **Mixer (reported):** the wiki's nonlinear formulas,
   pulse = 95.88 / (8128 / (p1 + p2) + 100) and tnd = 159.79 /
   (1 / (t / 8227 + n / 12241 + d / 22638) + 100), which the page calls
@@ -255,11 +293,11 @@ the code is our own.
   console takes the NTSC front-loader's, unsourced. Before that stage, two
   cartridges' own boards:
   - **MMC5 (spec):** the wiki's HVC-ETROM-02 drawing sends the APU's audio
-    (cartridge pin 45), the MMC5's DAC and its pulses each through 15 kOhm
-    and 100 nF into the inverting input of the MMC5's amplifier, with
-    10 kOhm of feedback, out to pin 46. Everything the console plays is
-    high-passed at 106 Hz and scaled by -2/3, taking that input as a
-    virtual ground as the drawing's internal reference implies.
+    (cartridge pin 45), the MMC5's DAC (`$5011` at 7-bit `$4011` step scale)
+    and its pulses each through 15 kOhm and 100 nF into the inverting input of
+    the MMC5's amplifier, with 10 kOhm of feedback, out to pin 46. Everything
+    the console plays is high-passed at 106 Hz and scaled by -2/3, taking that
+    input as a virtual ground as the drawing's internal reference implies.
   - **5B (reported, one cartridge):** rainwarrior's fit to his recordings
     of Gimmick! (NESdev forum t=17745 and p=225726, September 2018): the
     APU's input high-passed at 12 Hz and the 5B's channels at 20 Hz, mixed
@@ -273,20 +311,20 @@ the code is our own.
 - **Cartridge chips (spec, levels reported):** they sound only on the
   Famicom revision, whose cartridge slot returns audio (NESdev Wiki,
   "Expansion audio"). Expansion A is the VRC6 (two pulses with eight
-  duties, the accumulating sawtooth, the halt and 16x/256x frequency
-  bits); B the MMC5 (two pulses without sweep; its PCM channel is not
-  played); C the Namco 163 (one to
-  eight wavetable channels in 128 bytes of RAM, updated one every 15 CPU
-  cycles through one DAC, so eight channels whine as the chip does); D the
-  disk unit (a 64-step wave, its modulator with its 32-step table, the
-  master volume and its own low-pass); E the 5B (the AY core at a 16-cycle
-  tick with its 1.5 dB DAC steps). Their levels against the APU are what
-  each chip's wiki page reports: the VRC6 at the APU pulse's level and
-  inverted, the MMC5 equal and inverted, the 163 12 dB over the APU's
-  square (the page gives 11 to 13), the disk unit at 2.4 times a square.
-  The 5B's is Brad Smith's survey (nes-audio-tests, db_5b): its square at
-  volume 12 measured 1.3 dB under the APU's at full volume, so its loudest
-  channel is 7.7 dB over the APU's pulse.
+  duties, the accumulating sawtooth with `$B002` `E=0` clock reset, the halt
+  and 16x/256x frequency bits); B the MMC5 (two pulses without sweep plus
+  `$5011` 8-bit PCM DAC); C the Namco 163 (one to eight wavetable channels in
+  128 bytes of RAM, updated one every 15 CPU cycles through one DAC, so eight
+  channels whine as the chip does); D the disk unit (a 64-step wave, its
+  modulator with its 32-step table, RP2C33 negative-bias modulator rounding,
+  master volume and `$4089`-coupled `2 / 3 / 4 / 5 kHz` 2–2R low-pass); E the
+  5B (the AY core addressed via `$C000`/`$E000` at a 16-cycle tick with its
+  1.5 dB DAC steps). Their levels against the APU are what each chip's wiki
+  page reports: the VRC6 at the APU pulse's level and inverted, the MMC5 equal
+  and inverted, the 163 12 dB over the APU's square (the page gives 11 to 13),
+  the disk unit at 2.4 times a square. The 5B's is Brad Smith's survey
+  (nes-audio-tests, db_5b): its square at volume 12 measured 1.3 dB under the
+  APU's at full volume, so its loudest channel is 7.7 dB over the APU's pulse.
 
 ### The band-limited renderer
 
@@ -330,34 +368,38 @@ register are jumped ahead exactly when it can be (`Chips/Lfsr.h`).
   8x; with Double, 0.28 % and 1.8 % at 1x, 1.5 % and 3.9 % at 8x. These
   are not Reason's figures.
 
-### The playing layer (ours)
+### The sound driver (ours)
 
-The layer that turns keys into register writes is a sound driver of our own,
-and it only writes values the chips accept.
+The layer that turns keys into register writes (`Source/DSP/Driver/`) is a
+sound driver of our own, and it only pushes legal CPU bus writes onto each
+machine blackbox.
 
 - **Pitch** is a period register, chosen as the one nearest in pitch (in
   ratio, not in count), so the chip's quantisation and out-of-tune top notes
   are its own. A key below a part's reach goes to its board's fallback: the
-  handheld's wave channel below the pulses' 64 Hz, extended by more counts
-  than its 11-bit register holds down to A0 (ours); the console's triangle
-  below the pulses' 54.6 Hz.
+  handheld's CH3 below the pulses' 64 Hz (loaded with exact Pulse duty tables),
+  extended below 32 Hz (`A0`–`B0`) via a master-cycle `NR32` timer ISR over
+  all-`$FF` Wave RAM (ours); the console's triangle below the pulses' 54.6 Hz.
+  On FDS above ~1747 Hz and 8-channel Namco 163 above ~3728 Hz, the driver folds
+  multiple harmonic cycles into wavetable RAM so high notes up to C8 play on
+  the cartridge chip itself.
 - **Frames.** Everything that moves while a note sounds (the envelope's
   volume steps, vibrato, glide, the pitch wheel, the host's master tuning,
   the arpeggio) is written at the machines' frame, as a game's driver ran
   on its video frame: 59.73 Hz on the handheld, 60.10 or 50.01 Hz on the
-  console. A note's own start and end land on its sample.
+  console. A note's own start and end land on its sample, and CH3's `NR32`
+  timer ISR fires at its exact master cycle between frames.
 - **Envelopes** are times: Attack from silence to full, Decay from full
   down to Sustain, Release from where the key leaves the note down to
   silence. Each frame the envelope moves by the share of its stage that a
-  frame is, and the chip's own volume register is written the whole step it
-  has reached (the handheld's by the zombie write), so the volume still
-  moves in the chip's steps, once a frame, as a driver's did; a time under
-  a frame is at once. Level and velocity scale the same register. On the
-  handheld's and the console's linear DACs a step is a fixed amplitude; on
-  the 5B's logarithmic one it is a fixed number of decibels. The handheld's
-  wave channel has four levels and the console's triangle none, so on them
-  the envelope moves in those or only gates the note. Mono's legato notes
-  keep their envelope; each Arp step starts it again.
+  frame is, and the chip's own volume register is written the native step
+  it has reached (`0..32` on FDS `$4080`, `0..42` on VRC6 sawtooth `$B000`,
+  `0..3` on handheld CH3, `0..1` gate on APU triangle, `0..15` elsewhere;
+  handheld pulses and noise step by `$08` zombie writes). On handheld CH1/CH2
+  and noise, switching 15/7-bit LFSR width retriggers cleanly to prevent all-1s
+  lock-up, and retriggering a silent `$08`-parked channel skips redundant `$08`
+  writes so DMG zombie mode cannot blip `0 -> 1` before trigger. Mono's legato
+  notes keep their envelope; each Arp step starts it again.
 - **Voices.** One voice plays up to eight machines of one board
   (**Boards**), with its revision, expansion, bias and path. A note takes
   the free channel of the part, on any of the machines, that was freed
@@ -412,11 +454,12 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   through 100 uF, whose corner is the load's (about 50 Hz into 32 Ohm
   headphones, under 1 Hz into a line input); the amplifier's gain and
   clipping point are not published.
-- **The handheld.** The DAC's fade when it turns off ("varies between
-  models", Pan Docs), the zombie writes other than $08 and the wave
-  channel's start-up delay are not modelled; the commonly used 6-cycle
-  delay traces only to a forum post pointing at copyleft code. No published
-  source gives the fade's decay times. The Color's corners are one unit's,
+- **The handheld.** Non-`$08` DMG zombie writes remain unmodelled (CGB-04's
+  consistent rules and `$08` on DMG are implemented), and CH3's 6-T-cycle
+  trigger delay, 2-T-cycle DMG Wave RAM retrigger corruption window, and 50 us
+  DAC-off decay are reported from SameBoy (Expat/MIT) rather than our own
+  hardware capture; Pan Docs notes that DAC decay varies between handheld
+  models. The Color's corners are one unit's,
   read from a published picture of its waveform rather than from its
   samples, and fits within 20 % of the best error span 132 to 216 Hz and
   36 to 66 Hz; neither capacitor's value is published. The same recordings
@@ -451,13 +494,13 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   the wiki's figures used here. NES 2.0 sorts the 163's boards into three
   measured bands, 11 to 13, 16 to 17 and 18 to 19.5 dB (submappers 3 to
   5), which the boards' resistors do not predict; ours is the first.
-- **Ours, by design.** The playing layer, the handheld's wave counts past
-  2048, the noise pitch rule (a key picks the noise's colour), the period
-  nearest in pitch, the envelope's times and the Arp's restart of it, the
-  frame's phase at reset, the output stages settled at reset, the 5 Hz Pin
-  blocker, the level trims and their
-  reference, Double's detune and oversampling's decimator are ours, not the
-  hardware's.
+- **Ours, by design.** The sound drivers, the handheld's `NR32` timer ISR
+  below 32 Hz and FDS/N163 multi-cycle high-octave wavetable folding, the noise
+  pitch rule (a key picks the noise's colour), the period nearest in pitch, the
+  envelope's times and the Arp's restart of it, the frame's phase at reset, the
+  output stages settled at reset, the 5 Hz Pin blocker, the level trims and
+  their reference, Double's detune and oversampling's decimator are ours, not
+  the hardware's.
 - **The level trims' limits.** The trims match a part's single notes, at
   full level with Bias 0 and Mod 0, by K-weighted loudness; whether that or
   plain RMS (Reason's meter) is the better match for these tones has not

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Reboot VERSION 0.4.0 LANGUAGES CXX)
+project(Reboot VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -43,6 +43,9 @@ set(REBOOT_DSP_HEADERS
     Source/DSP/Chips/Lfsr.h
     Source/DSP/Chips/NesApu.h
     Source/DSP/Chips/Timer.h
+    Source/DSP/Driver/ConsoleDriver.h
+    Source/DSP/Driver/DriverTypes.h
+    Source/DSP/Driver/HandheldDriver.h
     Source/DSP/Driver/Machine.h
     Source/DSP/Driver/Waves.h
     Source/DSP/LevelTrimData.h

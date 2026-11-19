@@ -1,17 +1,23 @@
 #pragma once
 
-// One machine of the chosen board, behind the one interface the playing
-// layer uses. Every board type is built and prepared up front, so choosing
-// another board only resets it: nothing is allocated while playing.
+// One machine of the chosen board together with its sound driver, behind the
+// one interface the playing layer uses. Every board type is built and prepared
+// up front, so choosing another board only resets it: nothing is allocated
+// while playing.
 //
-// A part is what a layer plays: a run of the board's channels and the voice
+// A part is what the voice plays: a run of the board's channels and the voice
 // it plays on them. Keys a part cannot reach go to its board's fallback part
-// (ours, README How it works): the handheld's wave channel below the
-// pulses' 64 Hz, the console's triangle below the pulses' 54.6 Hz.
+// (ours, README How it works): the handheld's CH3 below the pulses' 64 Hz
+// (loaded with the chosen Pulse duty wave), the console's triangle below the
+// pulses' 54.6 Hz.
 
 #include "../Boards/Console.h"
 #include "../Boards/Handheld.h"
+#include "ConsoleDriver.h"
+#include "DriverTypes.h"
+#include "HandheldDriver.h"
 
+#include <climits>
 #include <cstdint>
 
 namespace protocodus::reboot {
@@ -34,7 +40,7 @@ struct Part {
 
 class Machine {
 public:
-    static constexpr int kMaxChannels = Console::kMaxChannels;
+    static constexpr int kMaxChannels = ConsoleDriver::kMaxChannels;
     static constexpr int kParts = 5;
 
     void Prepare(int sampleRate) {
@@ -45,19 +51,21 @@ public:
     void Reset(const MachineSettings& s) {
         kind_ = s.board;
         settings_ = s;
+        settings_.expansionChannels = s.expansionChannels < 1 ? 1 : s.expansionChannels > 8 ? 8 : s.expansionChannels;
         switch (kind_) {
         case BoardKind::Handheld:
             settings_.revision = Clamp(s.revision, Handheld::kRevisions);
             handheld_.Reset(settings_.revision);
+            handheldDriver_.Boot(handheld_);
             settings_.expansion = Console::kNone;
             break;
         default:
             settings_.revision = Clamp(s.revision, Console::kRevisions);
-            console_.Reset(settings_.revision, s.expansion, s.expansionChannels, s.bias);
+            console_.Reset(settings_.revision, s.expansion);
+            consoleDriver_.Boot(console_, settings_.expansionChannels, s.bias);
             settings_.expansion = console_.CartridgeType();
             break;
         }
-        settings_.expansionChannels = s.expansionChannels < 1 ? 1 : s.expansionChannels > 8 ? 8 : s.expansionChannels;
     }
 
     [[nodiscard]] BoardKind Kind() const noexcept { return kind_; }
@@ -79,17 +87,17 @@ public:
             case 2: return { 3, 1, Voice::Noise };
             case 3: {
                 // The cartridge's chip: its pulses, waves or tones.
-                const int first = Console::kApuChannels;
-                const int count = console_.Channels() - first;
+                const int first = ConsoleDriver::kApuChannels;
+                const int count = consoleDriver_.Channels(console_) - first;
                 if (count <= 0)
                     return {};
                 if (console_.CartridgeType() == Console::kVrc6)
                     return { first, 2, Voice::Pulse };
-                return { first, count, console_.VoiceOf(first) };
+                return { first, count, ConsoleDriver::VoiceOf(console_, first) };
             }
             case 4:
                 if (console_.CartridgeType() == Console::kVrc6)
-                    return { Console::kApuChannels + 2, 1, Voice::Saw };
+                    return { ConsoleDriver::kApuChannels + 2, 1, Voice::Saw };
                 return {};
             default: return {};
             }
@@ -97,10 +105,11 @@ public:
     }
 
     // Where keys go that `part` cannot reach; count 0 when nowhere.
+    // Handheld pulses fall back onto CH3 carrying the Pulse duty waveform.
     [[nodiscard]] Part FallbackOf(const Part& part) const noexcept {
         switch (kind_) {
         case BoardKind::Handheld:
-            return part.voice == Voice::Pulse ? Part { 2, 1, Voice::Wave } : Part {};
+            return part.voice == Voice::Pulse ? Part { 2, 1, Voice::Pulse } : Part {};
         default:
             return part.voice != Voice::Noise && part.voice != Voice::Triangle ? Part { 2, 1, Voice::Triangle } : Part {};
         }
@@ -110,7 +119,7 @@ public:
     [[nodiscard]] int Shapes(int channel, Voice voice) const noexcept {
         switch (voice) {
         case Voice::Pulse:
-            return kind_ == BoardKind::Console && console_.EightDuties(channel) ? 8 : 4;
+            return kind_ == BoardKind::Console && ConsoleDriver::EightDuties(console_, channel) ? 8 : 4;
         case Voice::Wave: case Voice::ModWave: return kWaveCount;
         case Voice::Noise: return 2;
         default: return 1;
@@ -146,51 +155,72 @@ public:
         }
     }
 
+    [[nodiscard]] std::int64_t NextEvent() const noexcept {
+        return kind_ == BoardKind::Handheld ? handheldDriver_.NextEvent() : INT64_MAX;
+    }
+
     void RunTo(std::int64_t cycle) {
         switch (kind_) {
-        case BoardKind::Handheld: handheld_.RunTo(cycle); break;
+        case BoardKind::Handheld: handheldDriver_.RunTo(handheld_, cycle); break;
         default: console_.RunTo(cycle); break;
+        }
+    }
+
+    void ServiceAt(std::int64_t cycle) noexcept {
+        if (kind_ == BoardKind::Handheld)
+            handheldDriver_.ServiceAt(handheld_, cycle);
+    }
+
+    [[nodiscard]] int QuantizeVolume(int channel, Voice voice, double gain) const noexcept {
+        switch (kind_) {
+        case BoardKind::Handheld: return HandheldDriver::QuantizeVolume(channel, voice, gain);
+        default: return ConsoleDriver::QuantizeVolume(channel, voice, gain);
         }
     }
 
     [[nodiscard]] bool PeriodFor(int channel, Voice voice, double hz, int shape, std::int64_t& period) const noexcept {
         switch (kind_) {
-        case BoardKind::Handheld: return handheld_.PeriodFor(channel, voice, hz, shape, period);
-        default: return console_.PeriodFor(channel, voice, hz, shape, period);
+        case BoardKind::Handheld: return handheldDriver_.PeriodFor(channel, voice, hz, shape, period);
+        default: return consoleDriver_.PeriodFor(console_, channel, voice, hz, shape, period);
         }
     }
 
     void Start(int channel, const ChannelSettings& s) {
         switch (kind_) {
-        case BoardKind::Handheld: handheld_.Start(channel, s); break;
-        default: console_.Start(channel, s); break;
+        case BoardKind::Handheld: handheldDriver_.Start(handheld_, channel, s); break;
+        default: consoleDriver_.Start(console_, channel, s); break;
         }
     }
 
     void Change(int channel, const ChannelSettings& s) {
         switch (kind_) {
-        case BoardKind::Handheld: handheld_.Change(channel, s); break;
-        default: console_.Change(channel, s); break;
+        case BoardKind::Handheld: handheldDriver_.Change(handheld_, channel, s); break;
+        default: consoleDriver_.Change(console_, channel, s); break;
         }
     }
 
     void Stop(int channel) {
         switch (kind_) {
-        case BoardKind::Handheld: handheld_.Stop(channel); break;
-        default: console_.Stop(channel); break;
+        case BoardKind::Handheld: handheldDriver_.Stop(handheld_, channel); break;
+        default: consoleDriver_.Stop(console_, channel); break;
         }
     }
 
     void SetBias(int level) {
         if (kind_ == BoardKind::Console)
-            console_.SetDmcLevel(level);
+            consoleDriver_.SetBias(console_, level);
     }
 
     // Adds the machine's sides into left and right.
     void Render(int frames, Path path, float* left, float* right) {
         switch (kind_) {
-        case BoardKind::Handheld: handheld_.Render(frames, path, left, right); break;
-        default: console_.Render(frames, path, left, right); break;
+        case BoardKind::Handheld:
+            handheldDriver_.RunTo(handheld_, handheld_.CycleAt(frames));
+            handheld_.Render(frames, path, left, right);
+            break;
+        default:
+            console_.Render(frames, path, left, right);
+            break;
         }
     }
 
@@ -203,7 +233,9 @@ private:
     BoardKind kind_ = BoardKind::Handheld;
     MachineSettings settings_;
     Handheld handheld_;
+    HandheldDriver handheldDriver_;
     Console console_;
+    ConsoleDriver consoleDriver_;
 };
 
 } // namespace protocodus::reboot

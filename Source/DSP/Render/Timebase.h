@@ -17,9 +17,14 @@ class Timebase {
 public:
     // Setup: restarts at cycle 0 on the block boundary.
     void Set(std::int64_t clockNum, std::int64_t clockDen, int sampleRate) noexcept {
+        SetAt(0, clockNum, clockDen, sampleRate);
+    }
+
+    // Setup: aligns sample 0 of the block to `startCycle`.
+    void SetAt(std::int64_t startCycle, std::int64_t clockNum, std::int64_t clockDen, int sampleRate) noexcept {
         perSample_ = clockNum;
         perCycle_ = static_cast<std::int64_t>(sampleRate) * clockDen;
-        c0_ = 0;
+        c0_ = startCycle;
         f0_ = 0;
     }
 

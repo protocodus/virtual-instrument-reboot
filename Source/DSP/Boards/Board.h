@@ -1,13 +1,14 @@
 #pragma once
 
-// What every board shares: the playing layer's view of a channel, the step
-// mix from a chip's DAC codes to its board's buses, and the Pin path's DC
-// blocker.
+// What every board blackbox shares: the step mix from a chip's DAC codes to
+// its board's buses, the Pin path's DC blocker, and a cycle-scheduled CPU bus
+// queue so multi-register writes arrive at realistic bus cycle intervals.
 //
-// A board is one machine: its chips on its master clock, their DACs, its
-// mixer and its output stage (README, How it works). The playing layer
-// talks to a board only through register writes at chip cycles, which the
-// board's Start/Change/Stop make from a ChannelSettings.
+// A board is one physical machine: its chips on its master clock, their DACs,
+// its mixer, its CPU bus, and its output stage (README, How it works). It knows
+// nothing about MIDI, notes, voices, or waveforms; the sound driver talks to a
+// board exclusively through CPU bus writes (`Write(address, value)`) and time
+// advancement (`RunTo(cycle)`).
 
 #include "../Render/Filters.h"
 #include "../Render/StepBuffer.h"
@@ -17,29 +18,6 @@
 
 namespace protocodus::reboot {
 
-// What a channel plays, as the playing layer chooses parts by it.
-enum class Voice : std::uint8_t {
-    Pulse,     // rectangle with a duty register
-    Triangle,  // the 2A03's 32-step triangle, no volume
-    Wave,      // a channel playing a wave from RAM
-    ModWave,   // the disk unit's wave with its modulator
-    Saw,       // the VRC6's accumulator
-    Tone,      // a square with no duty register (the 5B)
-    Noise,
-};
-
-// A note's settings in the chip's own units. The playing layer computes
-// period with the board's PeriodFor for the same voice, keeps volume on the
-// common 0-15 scale (the board maps it to the chip's steps), and passes the
-// part's shape and modulation unchanged.
-struct ChannelSettings {
-    Voice voice = Voice::Pulse;   // what the part plays on the channel
-    std::int64_t period = 0;
-    int volume = 0;
-    int shape = 0;
-    int mod = 0;
-};
-
 // Which output the board renders: the chip's pins (its DAC and mixer) or the
 // machine's line output (the board's own stage after them).
 enum class Path : std::uint8_t { Pin, Line };
@@ -48,6 +26,88 @@ enum class Path : std::uint8_t { Pin, Line };
 // chips' DC offsets (a Game Boy channel at rest sits at +1); a first-order
 // high-pass at 5 Hz takes them out. Ours, under every board's Pin path.
 constexpr double kPinBlockerHz = 5.0;
+
+// A single CPU bus write at a scheduled master clock cycle.
+struct BusWrite {
+    std::int64_t cycle = 0;
+    std::uint16_t address = 0;
+    std::uint8_t value = 0;
+};
+
+// Fixed-capacity circular queue of scheduled CPU bus writes.
+template <int Capacity = 1024>
+class BusWriteQueue {
+public:
+    void Clear() noexcept {
+        head_ = 0;
+        count_ = 0;
+        nextCycle_ = 0;
+        lastAddress_ = 0xFFFF;
+        lastValue_ = 0;
+        hasLast_ = false;
+    }
+
+    void ResetTiming(std::int64_t now) noexcept {
+        nextCycle_ = now;
+        lastAddress_ = 0xFFFF;
+        lastValue_ = 0;
+        hasLast_ = false;
+    }
+
+    [[nodiscard]] bool Empty() const noexcept { return count_ == 0; }
+    [[nodiscard]] bool Full() const noexcept { return count_ == Capacity; }
+    [[nodiscard]] bool HasLast() const noexcept { return hasLast_; }
+    [[nodiscard]] std::uint16_t LastAddress() const noexcept { return lastAddress_; }
+    [[nodiscard]] std::uint8_t LastValue() const noexcept { return lastValue_; }
+
+    [[nodiscard]] bool CanExecuteNow(std::int64_t now) const noexcept {
+        return count_ == 0 && nextCycle_ <= now;
+    }
+
+    void MarkImmediate(std::int64_t now, int stepCycles, std::uint16_t address, std::uint8_t value) noexcept {
+        nextCycle_ = now + stepCycles;
+        lastAddress_ = address;
+        lastValue_ = value;
+        hasLast_ = true;
+    }
+
+    void Schedule(std::int64_t now, int stepCycles, std::uint16_t address, std::uint8_t value) noexcept {
+        if (Full())
+            return;
+        const std::int64_t due = nextCycle_ > now ? nextCycle_ : now;
+        nextCycle_ = due + stepCycles;
+        lastAddress_ = address;
+        lastValue_ = value;
+        hasLast_ = true;
+        const int tail = (head_ + count_) % Capacity;
+        ring_[tail] = { due, address, value };
+        ++count_;
+    }
+
+    [[nodiscard]] const BusWrite& Front() const noexcept { return ring_[head_]; }
+
+    BusWrite Pop() noexcept {
+        const BusWrite w = ring_[head_];
+        head_ = (head_ + 1) % Capacity;
+        --count_;
+        return w;
+    }
+
+    [[nodiscard]] std::int64_t LastCycle() const noexcept {
+        if (count_ == 0)
+            return nextCycle_;
+        const int tail = (head_ + count_ - 1) % Capacity;
+        return ring_[tail].cycle;
+    }
+
+private:
+    BusWrite ring_[Capacity] {};
+    int head_ = 0, count_ = 0;
+    std::int64_t nextCycle_ = 0;
+    std::uint16_t lastAddress_ = 0xFFFF;
+    std::uint8_t lastValue_ = 0;
+    bool hasLast_ = false;
+};
 
 // The sources' levels onto the board's buses. A source's level is
 // quantised once to the step buffer's units, so the difference between two
@@ -97,21 +157,6 @@ private:
 // sections differ between a board's revisions.
 inline void DesignPinBlocker(FirstOrder& f, double sampleRate) {
     f.Design(FirstOrder::Kind::HighPass, kPinBlockerHz, sampleRate);
-}
-
-// The whole period register nearest in pitch to an exact real one. Every
-// pitch here goes as a count or as its inverse, so the nearer count is the
-// nearer in ratio: the lower one while count is under the geometric mean
-// of the two. Under 1 the count rounds as before, so a key far over a
-// channel's top note stays out of its reach.
-inline std::int64_t NearestCount(double count) noexcept {
-    if (!(count < 1.0e15))
-        return std::int64_t { 1 } << 50;
-    if (count < 1.0)
-        return count >= 0.5 ? 1 : 0;
-    const auto low = static_cast<std::int64_t>(count);
-    const double l = static_cast<double>(low);
-    return count * count < l * (l + 1.0) ? low : low + 1;
 }
 
 } // namespace protocodus::reboot

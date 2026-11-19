@@ -16,28 +16,38 @@ namespace protocodus::reboot {
 class FirstOrder {
 public:
     enum class Kind { Pass, HighPass, LowPass };
+    struct Coefficients {
+        double b0 = 1.0, b1 = 0.0, a1 = 0.0;
+    };
 
     // Setup, not real time: std::tan is a library call under -fno-builtin.
-    void Design(Kind kind, double cornerHz, double sampleRate) {
-        kind_ = kind;
-        if (kind == Kind::Pass) {
-            b0_ = 1.0, b1_ = 0.0, a1_ = 0.0;
-            return;
-        }
+    static Coefficients ComputeCoefficients(Kind kind, double cornerHz, double sampleRate) {
+        if (kind == Kind::Pass)
+            return {};
         // A corner at or past Nyquist (the console's 14 kHz at a 22 kHz
         // rate) would turn the prewarp's tangent negative: such a corner is
         // taken just under Nyquist.
         if (cornerHz > 0.45 * sampleRate)
             cornerHz = 0.45 * sampleRate;
         const double k = std::tan(3.141592653589793 * cornerHz / sampleRate);
-        a1_ = (k - 1.0) / (k + 1.0);
+        const double a1 = (k - 1.0) / (k + 1.0);
         if (kind == Kind::HighPass) {
-            b0_ = 1.0 / (1.0 + k);
-            b1_ = -b0_;
-        } else {
-            b0_ = k / (1.0 + k);
-            b1_ = b0_;
+            const double b0 = 1.0 / (1.0 + k);
+            return { b0, -b0, a1 };
         }
+        const double b0 = k / (1.0 + k);
+        return { b0, b0, a1 };
+    }
+
+    void Design(Kind kind, double cornerHz, double sampleRate) {
+        kind_ = kind;
+        const Coefficients c = ComputeCoefficients(kind, cornerHz, sampleRate);
+        b0_ = c.b0, b1_ = c.b1, a1_ = c.a1;
+    }
+
+    void SetCoefficients(Kind kind, const Coefficients& c) noexcept {
+        kind_ = kind;
+        b0_ = c.b0, b1_ = c.b1, a1_ = c.a1;
     }
 
     void Reset() noexcept { x1_ = 0.0, y1_ = 0.0; }
@@ -72,6 +82,7 @@ public:
         factor_ = std::pow(factorPerClock, 4194304.0 / sampleRate);
     }
     void Reset() noexcept { capacitor_ = 0.0; }
+    void Settle(double in) noexcept { capacitor_ = in; }
     double Process(double in) noexcept {
         const double out = in - capacitor_;
         capacitor_ = in - out * factor_;

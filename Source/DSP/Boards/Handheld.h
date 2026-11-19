@@ -1,8 +1,9 @@
 #pragma once
 
-// The handheld board: the Game Boy's APU (Chips/GameBoyApu.h) on its
-// 4194304 Hz clock, its four DACs, its stereo mixer and master volume, and
-// the coupling capacitor after them.
+// The handheld board blackbox: the Game Boy's APU (Chips/GameBoyApu.h) on its
+// 4194304 Hz clock, its four DACs, its stereo mixer and master volume, the
+// coupling capacitor and Color feedback amplifier after them, and the SM83
+// CPU bus interface.
 //
 // Revisions: Original (DMG) and Color (CGB), which differ in the APU's
 // quirks and in their output stage.
@@ -11,10 +12,15 @@
 // NRx2 & $F8 is not 0 (NR30 bit 7 for the wave channel); on, it maps digital
 // 0 to 15 linearly to analog +1 to -1 ("a disabled channel outputs 0, which
 // an enabled DAC will dutifully convert into analog 1"); off, it gives 0.
+// On Line, disabling an active DAC decays its last analog level toward 0 with
+// a 50 us RC time constant (reported: SameBoy MIT Core/apu.c DAC_DECAY_SPEED =
+// 20000, read for the physical rule, no code copied).
+//
 // The mixer adds the channels NR51 sends to each side and scales each side
 // by NR50's volume + 1 over 8. Pin is that sum. Line adds the capacitor:
-// Pan Docs' out = in - capacitor, capacitor = in - out * factor, with the
-// output 0 and the capacitor held while every DAC is off.
+// Pan Docs' out = in - capacitor, capacitor = in - out * factor, passing the
+// mixer sum plus any 50 us DAC turn-off residual continuously through it (and
+// Color's feedback amplifier) so disabling the last DAC decays smoothly.
 //
 // Line's corners (reported) are fitted to Herbert Weixelbaum's recordings
 // (herbertweixelbaum.com/comparison.htm, "game boy sound comparison"): each
@@ -27,19 +33,15 @@
 // and 47 Hz (the pairs within 20 % of the best fit's error span 132 to 216 Hz
 // and 36 to 66 Hz; Tools/fit_handheld_line.py). The Color takes the 47 Hz as its
 // capacitor and the 176 Hz after it, which Ken Shirriff's die analysis of
-// its IR3R53N explains: "an external feedback capacitor, which causes it to
+// its IR3R53N says has "an external feedback capacitor, which causes it to
 // act as a high-pass filter" (righto.com, 2020-06). Pan Docs' "use 0.998943
-// for MGB&CGB", one pole near 706 Hz, is neither. A Pocket, on the same
-// amplifier chip, fits 96 Hz and 25 Hz in the same recordings, 4.5 dB under
-// the original at 71 Hz, near kathoc's 2.8 dB (note.com, brickboy
-// Development Story #10, 2026-08-29): the corner is the board's capacitor,
-// not the chip's. The DAC's fade when it turns off, the amplifier's gain,
-// the headphone socket and speaker are not modelled (README, Known gaps).
+// for MGB&CGB", one pole near 706 Hz, is neither. The amplifier's gain,
+// the headphone socket and the speaker are not modelled (README, Known gaps).
 
 #include "../Chips/GameBoyApu.h"
-#include "../Driver/Waves.h"
 #include "Board.h"
 
+#include <cmath>
 #include <cstdint>
 
 namespace protocodus::reboot {
@@ -51,15 +53,14 @@ public:
     static constexpr double kFrameHz = 4194304.0 / 70224.0; // the LCD's 59.73 Hz
     static constexpr std::int64_t kFrameCycles = 70224;
 
-    static constexpr Voice VoiceOf(int channel) noexcept {
-        return channel < 2 ? Voice::Pulse : channel == 2 ? Voice::Wave : Voice::Noise;
-    }
-
-    // Setup.
     void Prepare(int sampleRate) {
         rate_ = sampleRate;
         DesignPinBlocker(pinBlocker_[0], sampleRate);
         DesignPinBlocker(pinBlocker_[1], sampleRate);
+        // Reported: SameBoy (MIT, Core/apu.c) models pre-GBA physical DAC
+        // off decay at DAC_DECAY_SPEED = 20000 (50 us).
+        static constexpr double kDacFadeSeconds = 1.0 / 20000.0;
+        dacFadeFactor_ = std::exp(-1.0 / (kDacFadeSeconds * static_cast<double>(sampleRate)));
     }
 
     void Reset(int revision) noexcept {
@@ -67,6 +68,9 @@ public:
         apu_.Reset(revision == kColor ? gb::Model::Cgb : gb::Model::Dmg);
         tb_.Set(gb::kClock, 1, rate_);
         mix_.Clear();
+        dacOff_[0].Clear();
+        dacOff_[1].Clear();
+        bus_.Clear();
         for (int s = 0; s < 2; ++s) {
             capacitor_[s].Design(revision == kColor ? kColorCapacitor : 0.999958, rate_);
             capacitor_[s].Reset();
@@ -76,142 +80,66 @@ public:
                 amplifier_[s].Design(FirstOrder::Kind::Pass, 0.0, rate_);
             amplifier_[s].Reset();
             pinBlocker_[s].Reset();
+            dacResidual_[s] = 0.0;
         }
-        dacsOn_ = false, dacsHeard_ = false, pending_ = 0;
-        for (Shadow& s : shadow_)
-            s = Shadow {};
-        Sink sink { this };
-        // A sound driver's start: power on, full master volume, every
-        // channel to both sides, the sweep off (Pan Docs, Audio registers).
-        apu_.Write(0xFF26, 0x80, sink);
-        apu_.Write(0xFF24, 0x77, sink);
-        apu_.Write(0xFF25, 0xFF, sink);
-        apu_.Write(0xFF10, 0x00, sink);
+        for (int c = 0; c < kChannels; ++c) {
+            wasDacOn_[c] = false;
+            lastChSide_[c][0] = 0.0, lastChSide_[c][1] = 0.0;
+        }
+    }
+
+    // Schedules a CPU bus write to $FF10-$FF3F using SM83 bus timing (8 T-cycles
+    // for repeated LDH (C), A writes; 12 T-cycles for LDH (a8), A; Pan Docs).
+    void Write(std::uint16_t address, std::uint8_t value) noexcept {
+        const int step = (bus_.HasLast() && bus_.LastAddress() == address) ? 8 : 12;
+        if (bus_.Full()) {
+            const BusWrite w = bus_.Pop();
+            WriteImmediate(w.address, w.value);
+        }
+        const std::int64_t now = apu_.Now();
+        if (bus_.CanExecuteNow(now)) {
+            WriteImmediate(address, value);
+            bus_.MarkImmediate(now, step, address, value);
+        } else {
+            bus_.Schedule(now, step, address, value);
+        }
+    }
+
+    [[nodiscard]] std::uint8_t Read(std::uint16_t address) noexcept { return apu_.Read(address); }
+
+    // Drains initial driver boot writes, settles the output stages on any
+    // resting bias, and aligns the sample block origin to the current cycle.
+    void FinishBoot() noexcept {
+        if (!bus_.Empty())
+            RunTo(bus_.LastCycle() + 1);
+        const double left = mix_.Land(0);
+        const double right = mix_.Land(1);
+        pinBlocker_[0].Settle(left);
+        pinBlocker_[1].Settle(right);
+        capacitor_[0].Settle(left);
+        capacitor_[1].Settle(right);
+        for (int s = 0; s < 2; ++s) {
+            amplifier_[s].Reset();
+            dacOff_[s].Clear();
+            dacResidual_[s] = 0.0;
+        }
+        tb_.SetAt(apu_.Now(), gb::kClock, 1, rate_);
+        bus_.ResetTiming(apu_.Now());
     }
 
     [[nodiscard]] std::int64_t CycleAt(int frame) const noexcept { return tb_.CycleAt(frame); }
+    [[nodiscard]] std::int64_t Now() const noexcept { return apu_.Now(); }
 
     void RunTo(std::int64_t cycle) {
         Sink sink { this };
-        apu_.Run(cycle, sink);
-    }
-
-    // The period for `hz` on a channel: for the pulses and the wave channel
-    // the count 2048 - x of the 11-bit register x, for the noise the NR43
-    // byte. False when the channel cannot reach `hz`.
-    [[nodiscard]] bool PeriodFor(int channel, Voice, double hz, int shape, std::int64_t& period) const noexcept {
-        if (hz <= 0.0)
-            return false;
-        if (channel < 2) {
-            // Pan Docs: 131072 / (2048 - x) Hz.
-            period = NearestCount(131072.0 / hz);
-            return period >= 1 && period <= 2048;
+        while (!bus_.Empty() && bus_.Front().cycle < cycle) {
+            const BusWrite w = bus_.Pop();
+            if (w.cycle > apu_.Now())
+                apu_.Run(w.cycle, sink);
+            WriteImmediate(w.address, w.value);
         }
-        if (channel == 2) {
-            // 65536 / (2048 - x) Hz; counts past 2048 are ours (Reset's
-            // SetWaveExtension), so every key reaches it.
-            period = NearestCount(65536.0 / hz);
-            return period >= 1;
-        }
-        period = NoiseFor(hz, shape != 0);
-        return true;
-    }
-
-    void Start(int channel, const ChannelSettings& s) {
-        Sink sink { this };
-        Shadow& sh = shadow_[channel];
-        if (channel < 2) {
-            const std::uint16_t base = channel == 0 ? 0xFF10 : 0xFF15;
-            const int x = 2048 - static_cast<int>(s.period);
-            const int volume = Clamp15(s.volume);
-            // Pan Docs: write $V8 to NRx2 before the trigger, so the DAC
-            // stays on and the envelope does not run.
-            apu_.Write(base + 1, static_cast<std::uint8_t>((s.shape & 3) << 6), sink);
-            apu_.Write(base + 2, static_cast<std::uint8_t>((volume << 4) | 0x08), sink);
-            apu_.Write(base + 3, static_cast<std::uint8_t>(x & 0xFF), sink);
-            apu_.Write(base + 4, static_cast<std::uint8_t>(0x80 | ((x >> 8) & 7)), sink);
-            sh = { true, s.period, volume, s.shape & 3 };
-        } else if (channel == 2) {
-            const int shape = s.shape % kWaveCount;
-            if (!sh.waveLoaded || sh.shape != shape) {
-                // DAC off, wave RAM, DAC on (Pan Docs: wave RAM is written
-                // with the channel off).
-                apu_.Write(0xFF1A, 0x00, sink);
-                for (int i = 0; i < 16; ++i)
-                    apu_.Write(static_cast<std::uint16_t>(0xFF30 + i), kWaves[shape].packed[i], sink);
-                sh.waveLoaded = true;
-            }
-            apu_.Write(0xFF1A, 0x80, sink);
-            WaveCount(s.period, sink);
-            apu_.Write(0xFF1C, WaveLevel(s.volume), sink);
-            const int x = WaveRegister(s.period);
-            apu_.Write(0xFF1D, static_cast<std::uint8_t>(x & 0xFF), sink);
-            apu_.Write(0xFF1E, static_cast<std::uint8_t>(0x80 | ((x >> 8) & 7)), sink);
-            sh.active = true, sh.period = s.period, sh.volume = s.volume, sh.shape = shape;
-        } else {
-            const int volume = Clamp15(s.volume);
-            apu_.Write(0xFF21, static_cast<std::uint8_t>((volume << 4) | 0x08), sink);
-            apu_.Write(0xFF22, static_cast<std::uint8_t>(s.period), sink);
-            apu_.Write(0xFF23, 0x80, sink);
-            sh = { true, s.period, volume, s.shape };
-        }
-    }
-
-    // A held note's new settings, written as a sound driver writes them
-    // between triggers: only what changed, the volume by zombie steps.
-    void Change(int channel, const ChannelSettings& s) {
-        Sink sink { this };
-        Shadow& sh = shadow_[channel];
-        if (!sh.active) {
-            Start(channel, s);
-            return;
-        }
-        if (channel < 2) {
-            const std::uint16_t base = channel == 0 ? 0xFF10 : 0xFF15;
-            if ((s.shape & 3) != sh.shape) {
-                apu_.Write(base + 1, static_cast<std::uint8_t>((s.shape & 3) << 6), sink);
-                sh.shape = s.shape & 3;
-            }
-            if (s.period != sh.period) {
-                const int x = 2048 - static_cast<int>(s.period);
-                apu_.Write(base + 3, static_cast<std::uint8_t>(x & 0xFF), sink);
-                apu_.Write(base + 4, static_cast<std::uint8_t>((x >> 8) & 7), sink);
-                sh.period = s.period;
-            }
-            Zombie(base + 2, sh, Clamp15(s.volume), sink);
-        } else if (channel == 2) {
-            if (s.shape % kWaveCount != sh.shape) {
-                // A new wave needs the channel off (Start; Pan Docs), so it
-                // starts again, as a driver's would.
-                Start(channel, s);
-                return;
-            }
-            if (s.period != sh.period) {
-                WaveCount(s.period, sink);
-                const int x = WaveRegister(s.period);
-                apu_.Write(0xFF1D, static_cast<std::uint8_t>(x & 0xFF), sink);
-                apu_.Write(0xFF1E, static_cast<std::uint8_t>((x >> 8) & 7), sink);
-                sh.period = s.period;
-            }
-            if (WaveLevel(s.volume) != WaveLevel(sh.volume)) {
-                apu_.Write(0xFF1C, WaveLevel(s.volume), sink);
-                sh.volume = s.volume;
-            }
-        } else {
-            if (s.period != sh.period) {
-                apu_.Write(0xFF22, static_cast<std::uint8_t>(s.period), sink);
-                sh.period = s.period;
-            }
-            Zombie(0xFF21, sh, Clamp15(s.volume), sink);
-        }
-    }
-
-    // Silence, keeping the DAC on (Pan Docs: turning a DAC off pops).
-    void Stop(int channel) {
-        ChannelSettings s;
-        s.period = shadow_[channel].period;
-        s.shape = shadow_[channel].shape;
-        Change(channel, s);
+        if (apu_.Now() < cycle)
+            apu_.Run(cycle, sink);
     }
 
     // Runs to the block's end, adds the board's sides into left and right,
@@ -219,148 +147,95 @@ public:
     void Render(int frames, Path path, float* left, float* right) {
         RunTo(tb_.CycleAt(frames));
         float bus[2][StepBuffer::kMaxFrames] {};
+        float offDelta[2][StepBuffer::kMaxFrames] {};
         mix_.Read(0, bus[0], frames);
         mix_.Read(1, bus[1], frames);
+        dacOff_[0].ReadDelta(offDelta[0], frames);
+        dacOff_[1].ReadDelta(offDelta[1], frames);
         float* out[2] = { left, right };
         for (int i = 0; i < frames; ++i) {
-            while (pending_ > 0 && queue_[0].sample <= i) {
-                dacsHeard_ = queue_[0].on;
-                for (int k = 1; k < pending_; ++k)
-                    queue_[k - 1] = queue_[k];
-                --pending_;
-            }
             for (int side = 0; side < 2; ++side) {
+                dacResidual_[side] = dacFadeFactor_ * (dacResidual_[side] + static_cast<double>(offDelta[side][i]));
+                if (dacResidual_[side] > -1.0e-15 && dacResidual_[side] < 1.0e-15)
+                    dacResidual_[side] = 0.0;
                 double y;
-                if (path == Path::Line)
-                    y = amplifier_[side].Process(dacsHeard_ ? capacitor_[side].Process(bus[side][i]) : 0.0);
-                else
+                if (path == Path::Line) {
+                    const double in = static_cast<double>(bus[side][i]) + dacResidual_[side];
+                    y = amplifier_[side].Process(capacitor_[side].Process(in));
+                } else {
                     y = pinBlocker_[side].Process(bus[side][i]);
+                }
                 out[side][i] += static_cast<float>(y);
             }
         }
-        for (int k = 0; k < pending_; ++k)
-            queue_[k].sample -= frames;
         tb_.Advance(frames);
     }
 
     [[nodiscard]] const gb::Apu& Chip() const noexcept { return apu_; }
+    [[nodiscard]] int Revision() const noexcept { return revision_; }
 
 private:
-    struct Shadow {
-        bool active = false;
-        std::int64_t period = 0;
-        int volume = 0;
-        int shape = 0;
-        bool waveLoaded = false;
-    };
-
     struct Sink {
         Handheld* board;
         void operator()(std::int64_t cycle) const { board->Changed(cycle); }
     };
 
-    static int Clamp15(int v) noexcept { return v < 0 ? 0 : v > 15 ? 15 : v; }
-
-    // NR32's output level nearest the common volume: mute, 25%, 50%, 100%
-    // (codes 0, 3, 2, 1).
-    static std::uint8_t WaveLevel(int volume) noexcept {
-        const int v = Clamp15(volume);
-        const int code = v >= 12 ? 1 : v >= 6 ? 2 : v >= 2 ? 3 : 0;
-        return static_cast<std::uint8_t>(code << 5);
-    }
-
-    static int WaveRegister(std::int64_t count) noexcept {
-        return count <= 2048 ? 2048 - static_cast<int>(count) : 0;
-    }
-
-    template <class S>
-    void WaveCount(std::int64_t count, S& sink) {
-        apu_.SetWaveExtension(count > 2048 ? static_cast<int>(count - 2048) : 0, sink);
-    }
-
-    // Pan Docs: "write $08 to NRx2 to increment the volume" - the one zombie
-    // write every unit agrees on; 15 of them lower it by one.
-    template <class S>
-    void Zombie(std::uint16_t nrx2, Shadow& sh, int volume, S& sink) {
-        for (int n = (volume - sh.volume) & 15; n > 0; --n)
-            apu_.Write(nrx2, 0x08, sink);
-        sh.volume = volume;
-    }
-
-    // The NR43 byte whose LFSR clock, 262144 / (r * 2^s) Hz with r = 0
-    // counting as 0.5 (Pan Docs), is nearest `hz` times the register's
-    // cycle: 127 steps in 7-bit mode, so it plays in tune, and 32 in 15-bit
-    // mode (ours: the key picks the noise's colour).
-    static std::uint8_t NoiseFor(double hz, bool shortMode) noexcept {
-        const double target = hz * (shortMode ? 127.0 : 32.0);
-        std::uint8_t best = 0;
-        double bestRatio = 0.0;
-        for (int s = 0; s < 14; ++s)
-            for (int r = 0; r < 8; ++r) {
-                const double rate = 262144.0 / ((r ? r : 0.5) * static_cast<double>(1 << s));
-                const double ratio = rate > target ? rate / target : target / rate;
-                if (bestRatio == 0.0 || ratio < bestRatio) {
-                    bestRatio = ratio;
-                    best = static_cast<std::uint8_t>((s << 4) | r);
-                }
-            }
-        return static_cast<std::uint8_t>(best | (shortMode ? 0x08 : 0x00));
+    void WriteImmediate(std::uint16_t address, std::uint8_t value) noexcept {
+        Sink sink { this };
+        apu_.Write(address, value, sink);
     }
 
     void Changed(std::int64_t cycle) noexcept {
         const std::int64_t position = tb_.Position(cycle, StepBuffer::kSubBits);
         const std::uint8_t nr51 = apu_.Panning();
         const std::uint8_t nr50 = apu_.MasterVolume();
+        // NR50: bits 6-4 left, 2-0 right; (volume + 1) / 8.
+        const double masterLeft = (((nr50 >> 4) & 7) + 1) / 8.0;
+        const double masterRight = ((nr50 & 7) + 1) / 8.0;
         double side[2] = { 0.0, 0.0 };
-        bool any = false;
+        double chSide[kChannels][2] {};
         for (int c = 0; c < kChannels; ++c) {
             if (!apu_.DacOn(c))
                 continue;
-            any = true;
             const double analog = 1.0 - 2.0 * apu_.Out(c) / 15.0;
             if (nr51 & (0x10 << c))
-                side[0] += analog;
+                chSide[c][0] = analog * masterLeft;
             if (nr51 & (0x01 << c))
-                side[1] += analog;
+                chSide[c][1] = analog * masterRight;
+            side[0] += chSide[c][0];
+            side[1] += chSide[c][1];
         }
-        // NR50: bits 6-4 left, 2-0 right; (volume + 1) / 8.
-        const float levels[2] = {
-            static_cast<float>(side[0] * (((nr50 >> 4) & 7) + 1) / 8.0),
-            static_cast<float>(side[1] * ((nr50 & 7) + 1) / 8.0),
-        };
+        const float levels[2] = { static_cast<float>(side[0]), static_cast<float>(side[1]) };
         mix_.Set(0, position, levels);
-        if (any != dacsOn_) {
-            dacsOn_ = any;
-            // The capacitor switches with the DACs; the steps reach the
-            // output blep::kDelay samples late, and so does the switch.
-            const int sample = static_cast<int>(position >> StepBuffer::kSubBits) + blep::kDelay;
-            if (pending_ == kQueue)
-                --pending_;
-            queue_[pending_++] = { sample, any };
+        for (int c = 0; c < kChannels; ++c) {
+            const bool dac = apu_.DacOn(c);
+            if (!dac && wasDacOn_[c]) {
+                dacOff_[0].Add(position, QuantizeLevel(static_cast<float>(lastChSide_[c][0])));
+                dacOff_[1].Add(position, QuantizeLevel(static_cast<float>(lastChSide_[c][1])));
+            }
+            wasDacOn_[c] = dac;
+            lastChSide_[c][0] = chSide[c][0];
+            lastChSide_[c][1] = chSide[c][1];
         }
     }
-
-    static constexpr int kQueue = 32;
-    struct Switch {
-        int sample;
-        bool on;
-    };
 
     int rate_ = 48000;
     int revision_ = kOriginal;
     gb::Apu apu_;
     Timebase tb_;
+    BusWriteQueue<> bus_;
     StepMix<1, 2> mix_;
+    StepBuffer dacOff_[2];
     // A capacitor's factor per clock for a corner f is 1 - 2 pi f / 4194304.
     static constexpr double kColorCapacitor = 1.0 - 2.0 * 3.141592653589793 * 47.0 / 4194304.0;
 
     ChargeHighPass capacitor_[2];
     FirstOrder amplifier_[2];   // the Color's feedback high-pass; the original's passes
     FirstOrder pinBlocker_[2];
-    bool dacsOn_ = false, dacsHeard_ = false;
-    Switch queue_[kQueue] {};
-    int pending_ = 0;
-    Shadow shadow_[kChannels];
+    double dacFadeFactor_ = 0.0;
+    bool wasDacOn_[kChannels] {};
+    double lastChSide_[kChannels][2] {};
+    double dacResidual_[2] {};
 };
 
 } // namespace protocodus::reboot

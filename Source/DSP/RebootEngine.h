@@ -142,7 +142,7 @@ private:
     [[nodiscard]] double Pitch(const Slot& n, double cents = 0.0) const;
     // Cents each set plays off the note: the first set down, the Double set up.
     [[nodiscard]] double Spread() const noexcept { return double_ ? detune_ / 2.0 : 0.0; }
-    [[nodiscard]] int Volume(const Slot& n) const noexcept;
+    [[nodiscard]] double Gain(const Slot& n) const noexcept;
     bool Compose(int slot, ChannelSettings& s, double cents = 0.0) const;
     void Send(int slot, const ChannelSettings& s, bool start);
     void Write(int slot);

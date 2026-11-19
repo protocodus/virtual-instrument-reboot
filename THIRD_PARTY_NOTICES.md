@@ -11,6 +11,12 @@ that uses it.
 
 - Pan Docs (gbdev, CC0): Audio, Audio Registers, Audio details; the gbdev
   wiki's "Game Boy sound hardware" for the frame sequencer's steps.
+- SameBoy (Lior Halphon, Expat/MIT licence,
+  [ThirdParty/sameboy-LICENSE.txt](ThirdParty/sameboy-LICENSE.txt)): read for the
+  hardware timing and analog decay rules it documents (CH3 6-T-cycle trigger
+  delay, 2-T-cycle DMG Wave RAM retrigger corruption window, and 50 us DAC
+  turn-off decay in `Source/DSP/Chips/GameBoyApu.h` and
+  `Source/DSP/Boards/Handheld.h`). No code is copied.
 - The NESdev Wiki: the APU pages, "APU Mixer", "Cycle reference chart",
   "Expansion audio", and the VRC6, MMC5, Namco 163, FDS and Sunsoft 5B audio
   pages.

@@ -753,6 +753,104 @@ void TestBounds() {
     }
 }
 
+void TestAuthenticityEnhancements() {
+    // 1. Handheld CH3 sub-32 Hz NR32 timer ISR (A0 = 27.5 Hz, B0 = 30.87 Hz).
+    {
+        Controls c = Plain(0, 1, 2);
+        auto e = Fresh(c, 48000.0);
+        for (int midi : { 21, 23 }) {
+            e->Reset();
+            const double hz = 440.0 * std::pow(2.0, (midi - 69) / 12.0);
+            const Audio a = Play(*e, { On(100, midi) }, 144000);
+            const double got = Measure(a.left, hz, 48000.0, 24000, 144000);
+            Check(got > 0.0 && std::fabs(Cents(got, hz)) < 15.0,
+                  "handheld sub-32 Hz CH3 NR32 ISR MIDI " + std::to_string(midi) + ": got " + std::to_string(got) + " Hz");
+        }
+    }
+
+    // 2. Handheld < 64 Hz Pulse fallback onto CH3 preserves Pulse duty shapes.
+    {
+        auto renderPulse = [](int shape) {
+            auto e = Fresh(Plain(0, 0, shape), 48000.0);
+            return Play(*e, { On(100, 28) }, 48000); // E1 (~41.20 Hz)
+        };
+        const Audio a0 = renderPulse(0); // 12.5 % duty
+        const Audio a2 = renderPulse(2); // 50 % duty
+        const double hz = 440.0 * std::pow(2.0, (28 - 69) / 12.0);
+        const double f0 = Measure(a0.left, hz, 48000.0, 12000, 48000);
+        const double f2 = Measure(a2.left, hz, 48000.0, 12000, 48000);
+        Check(Rms(a0.left, 12000, 48000) > 0.01 && Rms(a2.left, 12000, 48000) > 0.01,
+              "handheld < 64 Hz Pulse fallback sounds across duty shapes");
+        Check(f0 > 0.0 && std::fabs(Cents(f0, hz)) < 10.0 && f2 > 0.0 && std::fabs(Cents(f2, hz)) < 10.0,
+              "handheld < 64 Hz Pulse fallback plays in tune");
+        double maxDiff = 0.0;
+        for (std::size_t i = 12000; i < 48000; ++i)
+            maxDiff = std::max(maxDiff, std::fabs(static_cast<double>(a0.left[i] - a2.left[i])));
+        Check(maxDiff > 0.02, "handheld < 64 Hz Pulse fallback preserves Shape duty difference");
+    }
+
+    // 3. Console high-octave FDS and 8-ch Namco 163 fold wavetables on chip up to C8
+    // without falling back to the APU Triangle (whose resting Out(2) is 15).
+    {
+        auto checkHigh = [](int expansion, int expChannels, int midi, const char* label) {
+            Controls c = Plain(1, 3, 2);
+            c[kRevision] = 1; // Famicom
+            c[kExpansion] = expansion;
+            c[kExpansionChannels] = expChannels;
+            auto e = Fresh(c, 48000.0, 4);
+            e->Midi(On(0, midi).midi.data(), 3);
+            std::vector<float> bufL(48000, 0.0f);
+            std::vector<float> bufR(48000, 0.0f);
+            bool triangleQuiet = true;
+            for (int i = 0; i < 48000; i += 256) {
+                const int n = std::min(256, 48000 - i);
+                e->Process(bufL.data() + i, bufR.data() + i, n);
+                if (e->MachineAt(0).ConsoleBoard().Apu().Out(2) != 15)
+                    triangleQuiet = false;
+            }
+            const double hz = 440.0 * std::pow(2.0, (midi - 69) / 12.0);
+            const double got = Measure(bufL, hz, 48000.0, 8000, 48000);
+            Check(triangleQuiet, std::string(label) + " stays on cartridge chip (APU Triangle untouched)");
+            Check(got > 0.0 && std::fabs(Cents(got, hz)) < 15.0,
+                  std::string(label) + " plays in tune: got " + std::to_string(got) + " Hz");
+        };
+        checkHigh(4, 1, 96, "FDS C7");
+        checkHigh(4, 1, 108, "FDS C8");
+        checkHigh(3, 8, 108, "8-ch N163 C8");
+    }
+
+    // 4. Native FDS (0..32) and VRC6 Saw (0..42) volume resolution during release.
+    {
+        auto countSteps = [](int expansion, int part, int shape) {
+            Controls c = Plain(1, part, shape);
+            c[kRevision] = 1; // Famicom
+            c[kExpansion] = expansion;
+            c[kBoards] = 1;
+            c[kAttack] = 0.0;
+            c[kDecay] = 0.0;
+            c[kSustain] = 15;
+            c[kRelease] = 2000.0;
+            auto e = Fresh(c, 48000.0);
+            const Audio a = Play(*e, { On(0, 69), Off(4800, 69) }, 96000);
+            const double full = Rms(a.left, 1600, 4656); // ~14 cycles of 440 Hz
+            int steps = 0;
+            double last = full;
+            for (std::size_t off = 5600; off + 764 <= 92000; off += 800) {
+                const double r = Rms(a.left, off, off + 764);
+                if (last - r > 0.005 * full) {
+                    ++steps;
+                    last = r;
+                }
+            }
+            return steps;
+        };
+        const int fdsSteps = countSteps(4, 3, 2);
+        const int vrc6SawSteps = countSteps(1, 4, 0);
+        Check(fdsSteps > 20, "FDS native 0..32 volume steps exceed 4-bit count: " + std::to_string(fdsSteps));
+        Check(vrc6SawSteps > 25, "VRC6 Saw native 0..42 volume steps exceed 4-bit count: " + std::to_string(vrc6SawSteps));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -771,6 +869,7 @@ int main() {
     TestHeldWaves();
     TestTouch();
     TestBounds();
+    TestAuthenticityEnhancements();
     if (failures == 0)
         std::printf("Reboot.Engine: all checks passed\n");
     return failures == 0 ? 0 : 1;

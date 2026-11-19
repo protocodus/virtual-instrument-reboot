@@ -240,7 +240,8 @@ std::vector<Step<gb::Apu>> GbScript(bool lazy, std::int64_t quiet, std::int64_t 
     s.push_back(At<A>(10, [lazy](A& a, T& t) {
         static const std::uint8_t wave[16] = { 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
                                                0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10 };
-        a.LoadWave(wave);
+        for (int i = 0; i < 16; ++i)
+            a.Write(static_cast<std::uint16_t>(0xFF30 + i), wave[i], t);
         // Pulses at duty 50 % and 25 %; zombie mode (volume 0, increase,
         // pace 0) is how the lazy script silences them without turning
         // their DACs off.
@@ -346,9 +347,10 @@ void TestGameBoy() {
 
     // Pan Docs, Obscure Behavior: a wave trigger plays first "the previous
     // one still in the high nibble of the sample buffer", then index 1.
-    // Period x = $400 steps every 2048 cycles: from a trigger at 10 the
-    // channel reads 1, 2 and 3 (the byte $23) by 6154; retriggered at 7000
-    // it plays 2, then 1 at 9048.
+    // Period x = $400 steps every 2048 cycles, plus the hardware 6-T-cycle
+    // trigger delay (SameBoy MIT): from a trigger at 10 the channel reads
+    // 1, 2 and 3 (the byte $23) by 6160; retriggered at 7000 it plays 2,
+    // then 1 at 9054.
     {
         using A = gb::Apu;
         using T = Trace<A>;
@@ -356,7 +358,8 @@ void TestGameBoy() {
         s.push_back(At<A>(10, [](A& a, T& t) {
             static const std::uint8_t wave[16] = { 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
                                                    0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10 };
-            a.LoadWave(wave);
+            for (int i = 0; i < 16; ++i)
+                a.Write(static_cast<std::uint16_t>(0xFF30 + i), wave[i], t);
             a.Write(0xFF1A, 0x80, t);
             a.Write(0xFF1C, 0x20, t);
             a.Write(0xFF1D, 0x00, t);
@@ -366,7 +369,59 @@ void TestGameBoy() {
         const Trace<A> r = Play(apu, GbRead, s, 12000, 12001);
         Check(r.At(6999)[2] == 3, "gb wave does not play index 3 before the retrigger");
         Check(r.At(7000)[2] == 2, "gb wave trigger does not play the buffer's high nibble first");
-        Check(r.At(9047)[2] == 2 && r.At(9048)[2] == 1, "gb wave trigger does not go on to index 1");
+        Check(r.At(9053)[2] == 2 && r.At(9054)[2] == 1, "gb wave trigger does not go on to index 1 after 6-cycle delay");
+    }
+
+    // Wave RAM active access rules (Pan Docs): inactive DAC-on writes directly;
+    // active CGB writes redirect to the playing byte; active DMG ignores
+    // writes outside the 2-T-cycle read window.
+    {
+        auto sink = [](std::int64_t) {};
+        for (gb::Model model : { gb::Model::Dmg, gb::Model::Cgb }) {
+            gb::Apu a;
+            a.Reset(model);
+            for (int i = 0; i < 16; ++i)
+                a.Write(static_cast<std::uint16_t>(0xFF30 + i), static_cast<std::uint8_t>(i * 0x11), sink);
+            a.Write(0xFF1A, 0x80, sink);
+            Check(a.Read(0xFF35) == 0x55, "gb wave RAM inactive DAC-on read failed");
+            a.Write(0xFF1C, 0x20, sink);
+            a.Write(0xFF1D, 0x00, sink);
+            a.Write(0xFF1E, 0x84, sink); // period 2048, due at 2054
+            a.Run(2060, sink);           // 6 cycles after read at 2054 (byte 0)
+            a.Write(0xFF35, 0xAA, sink);
+            a.Write(0xFF1A, 0x00, sink); // stop channel to inspect Wave RAM directly
+            Check(a.Read(0xFF35) == 0x55, "gb active wave RAM wrote to addressed byte instead of locking/redirecting");
+            if (model == gb::Model::Cgb)
+                Check(a.Read(0xFF30) == 0xAA, "cgb active wave RAM write did not redirect to current byte");
+            else
+                Check(a.Read(0xFF30) == 0x00, "dmg active wave RAM write outside read window was not ignored");
+        }
+    }
+
+    // CGB zombie mode (Pan Docs) and DMG power-off length counter preservation.
+    {
+        auto sink = [](std::int64_t) {};
+        gb::Apu cgb;
+        cgb.Reset(gb::Model::Cgb);
+        cgb.Write(0xFF12, 0xF8, sink);
+        cgb.Write(0xFF14, 0x86, sink);
+        cgb.Write(0xFF12, 0x08, sink); // +1 mod 16 -> 0
+        Check(cgb.Out(0) == 0, "cgb zombie +1 wrap failed");
+        cgb.Write(0xFF12, 0x51, sink); // pace 0 -> 1, still not halted (+1) -> 1
+        cgb.Write(0xFF12, 0x58, sink); // decrease -> increase (+2 -> 3, flip -> 13)
+        cgb.Write(0xFF11, 0x80, sink);
+        cgb.Run(20000, sink);
+        Check(cgb.Out(0) == 13 || cgb.Out(0) == 0, "cgb zombie mode flip failed");
+
+        gb::Apu dmg;
+        dmg.Reset(gb::Model::Dmg);
+        dmg.Write(0xFF26, 0x00, sink); // power off
+        dmg.Write(0xFF11, 0x3F, sink); // length = 1 on DMG while powered off
+        dmg.Write(0xFF26, 0x80, sink); // power on
+        dmg.Write(0xFF12, 0xF0, sink);
+        dmg.Write(0xFF14, 0xC6, sink); // trigger with length enabled
+        dmg.Run(16384, sink);
+        Check((dmg.Read(0xFF26) & 1) == 0, "dmg length written while powered off did not expire");
     }
 }
 
@@ -651,26 +706,30 @@ std::vector<Step<famicom::Namco163>> N163Script(bool lazy, std::int64_t heard) {
 
 Snapshot FdsRead(const famicom::Fds& c) { return { c.Out(), c.MasterVolume() }; }
 
-std::vector<Step<famicom::Fds>> FdsScript() {
+std::vector<Step<famicom::Fds>> FdsScript(bool lazy, std::int64_t heard) {
     using C = famicom::Fds;
     using T = Trace<C>;
     std::vector<Step<C>> s;
-    s.push_back(At<C>(9, [](C& c, T& t) {
+    s.push_back(At<C>(9, [lazy](C& c, T& t) {
         c.Write(0x4023, 0x02, t);
         c.Write(0x4089, 0x80, t);
         for (int i = 0; i < 64; ++i)
             c.Write(static_cast<std::uint16_t>(0x4040 + i), static_cast<std::uint8_t>(i < 32 ? i * 2 : 127 - i * 2), t);
         c.Write(0x4089, 0x00, t);
-        c.Write(0x4080, 0xA0, t);                 // gain 32
+        c.Write(0x4080, lazy ? 0x80 : 0xA0, t);  // gain 0 or 32
         c.Write(0x4087, 0x80, t);
         for (int i = 0; i < 32; ++i)
             c.Write(0x4088, static_cast<std::uint8_t>(i < 16 ? 1 : 7), t);
         c.Write(0x4084, 0x8C, t);                 // modulation depth 12
-        c.Write(0x4086, 0x20, t), c.Write(0x4087, 0x00, t);
+        c.Write(0x4086, 0x00, t), c.Write(0x4087, 0x00, t);
         c.Write(0x4082, 0x00, t), c.Write(0x4083, 0x02, t);
     }));
-    s.push_back(At<C>(300000, [](C& c, T& t) { c.Write(0x4080, 0x05, t); }));   // decay
-    s.push_back(At<C>(600000, [](C& c, T& t) { c.Write(0x4089, 0x02, t); }));
+    s.push_back(At<C>(heard, [](C& c, T& t) {
+        c.Write(0x4080, 0xA0, t);
+        c.Write(0x4086, 0x20, t);
+    }));
+    s.push_back(At<C>(heard + 150000, [](C& c, T& t) { c.Write(0x4080, 0x05, t); }));   // decay
+    s.push_back(At<C>(heard + 350000, [](C& c, T& t) { c.Write(0x4089, 0x02, t); }));
     return s;
 }
 
@@ -717,7 +776,41 @@ void TestCartridges() {
 
     famicom::Fds fds;
     fds.Reset();
-    CheckPartitions("fds", fds, FdsRead, FdsScript(), end);
+    CheckPartitions("fds", fds, FdsRead, FdsScript(false, heard), end);
+    CheckPartitions("fds lazy", fds, FdsRead, FdsScript(true, heard), end);
+    CheckCatchUp("fds", fds, FdsRead, FdsScript(false, heard), FdsScript(true, heard), heard, 10000, end);
+
+    // VRC6 saw: disabling via $B002 bit 7 resets its 14-clock phase counter.
+    {
+        famicom::Vrc6 c = vrc6;
+        auto sink = [](std::int64_t) {};
+        c.Write(0xB000, 0x10, sink);
+        c.Write(0xB001, 0x09, sink), c.Write(0xB002, 0x80, sink);
+        c.Run(55, sink); // odd number of clocks into the 14-clock cycle
+        c.Write(0xB002, 0x00, sink);
+        c.Write(0xB002, 0x80, sink);
+        c.Run(c.Now() + 25, sink); // 2 clocks later -> first addition at clock 2
+        Check(c.Out(2) == (0x10 >> 3), "vrc6 saw: clearing E did not reset 14-clock phase");
+    }
+
+    // FDS negative-bias modulator rounding (rainwarrior's RP2C33 formula):
+    // bias = -63, gain = 33 -> bias * gain = -2079, temp = -131 (-67 after +64),
+    // wrapped to +189 -> (pitch * 189) = 0x100 * 189 = 48384.
+    {
+        famicom::Fds c = fds;
+        auto sink = [](std::int64_t) {};
+        c.Write(0x4023, 0x02, sink);
+        c.Write(0x4089, 0x80, sink);
+        for (int i = 0; i < 64; ++i)
+            c.Write(static_cast<std::uint16_t>(0x4040 + i), static_cast<std::uint8_t>(i), sink);
+        c.Write(0x4089, 0x00, sink);
+        c.Write(0x4080, 0xA0, sink);
+        c.Write(0x4084, 0xA1, sink); // gain 33
+        c.Write(0x4085, 0x41, sink); // 7-bit signed -63
+        c.Write(0x4082, 0x00, sink), c.Write(0x4083, 0x01, sink); // pitch = 0x100
+        c.Run(16 * 128, sink);
+        Check(c.Out() > 0, "fds negative-bias modulator produced silent/invalid output");
+    }
 
     // NESdev, VRC6 audio: a pulse at period t runs at CPU / (16 (t + 1))
     // with duty (d + 1) / 16; the saw at CPU / (14 (t + 1)), its

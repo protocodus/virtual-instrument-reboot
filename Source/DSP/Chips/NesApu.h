@@ -110,6 +110,14 @@ public:
     [[nodiscard]] int Out(int channel) const noexcept { return out_[channel]; }
     [[nodiscard]] int RegionIndex() const noexcept { return region_; }
 
+    // A CPU read of $4015 at Now() (NESdev, APU Status).
+    [[nodiscard]] std::uint8_t ReadStatus() noexcept {
+        CatchUpAll();
+        return static_cast<std::uint8_t>((pulse_[0].length > 0 ? 1 : 0) | (pulse_[1].length > 0 ? 2 : 0)
+                                         | (triangle_.length > 0 ? 4 : 0) | (noise_.length > 0 ? 8 : 0)
+                                         | (dmc_.bytesLeft > 0 ? 16 : 0));
+    }
+
     // Processes every event before `to`; sink(cycle) follows any change of
     // the output codes.
     template <class Sink>
