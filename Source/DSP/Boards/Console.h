@@ -219,20 +219,19 @@ public:
                 --fdsPending_;
             }
             const double cart = cartridge_ == kFds ? fdsLowPass_.Process(bus[1][i]) : bus[1][i];
-            double x;
-            if (path == Path::Line) {
-                if (cartridge_ == kMmc5)
-                    x = -10.0 / 15.0 * mmc5Board_.Process(bus[0][i]);
-                else if (cartridge_ == k5B)
-                    x = s5bOut_.Process(Amplify5B(s5bApuIn_.Process(bus[0][i]) + s5bInternal_.Process(cart)));
-                else
-                    x = bus[0][i] + cart;
-                x = lowPass_.Process(highPass_.Process(x));
-            } else {
-                x = pinBlocker_.Process(bus[0][i] + cart);
-            }
-            left[i] += static_cast<float>(x);
-            right[i] += static_cast<float>(x);
+            // Path selects the tap to hear. The pin blocker and the
+            // cartridge/line circuitry continue to see the same board.
+            const double mix = bus[0][i] + cart;
+            const double pin = pinBlocker_.Process(mix);
+            double lineIn = mix;
+            if (cartridge_ == kMmc5)
+                lineIn = -10.0 / 15.0 * mmc5Board_.Process(bus[0][i]);
+            else if (cartridge_ == k5B)
+                lineIn = s5bOut_.Process(Amplify5B(s5bApuIn_.Process(bus[0][i]) + s5bInternal_.Process(cart)));
+            const double line = lowPass_.Process(highPass_.Process(lineIn));
+            const float output = static_cast<float>(path == Path::Line ? line : pin);
+            left[i] += output;
+            right[i] += output;
         }
         for (int k = 0; k < fdsPending_; ++k)
             fdsQueue_[k].sample -= frames;

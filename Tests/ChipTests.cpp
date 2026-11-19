@@ -291,6 +291,26 @@ void TestGameBoy() {
     CheckPartitions("gb lazy", apu, GbRead, GbScript(true, quiet, heard), end);
     CheckCatchUp("gb", apu, GbRead, GbScript(false, quiet, heard), GbScript(true, quiet, heard), heard, 0, end);
 
+    // Pan Docs, NR52: clearing power clears NR50/NR51, cuts active DACs
+    // and preserves wave RAM. The board must see the transition on that write.
+    for (gb::Model model : { gb::Model::Dmg, gb::Model::Cgb }) {
+        gb::Apu chip;
+        chip.Reset(model);
+        int notifications = 0;
+        auto sink = [&](std::int64_t) { ++notifications; };
+        chip.Write(0xFF30, 0xAB, sink);
+        chip.Write(0xFF17, 0xF0, sink);
+        chip.Write(0xFF19, 0x80, sink);
+        notifications = 0;
+        chip.Write(0xFF26, 0, sink);
+        Check(notifications == 1 && !chip.DacOn(1), "gb power-down must notify the board of DAC shutdown");
+        chip.Write(0xFF26, 0x80, sink);
+        Check(chip.MasterVolume() == chip.Read(0xFF24) && chip.MasterVolume() == 0
+                  && chip.Panning() == chip.Read(0xFF25) && chip.Panning() == 0,
+              "gb power cycle must clear the physical mixer and its register readback together");
+        Check(chip.Read(0xFF30) == 0xAB, "gb power cycle must preserve wave RAM");
+    }
+
     // Pan Docs: a pulse at period x runs at 131072 / (2048 - x) Hz with the
     // duty its NR11 names; the wave channel at 65536 / (2048 - x).
     for (int duty = 0; duty < 4; ++duty) {
@@ -468,6 +488,40 @@ void TestNes() {
     CheckPartitions("nes", apu, NesRead, NesScript(false, heard), end);
     CheckPartitions("nes lazy", apu, NesRead, NesScript(true, heard), end);
     CheckCatchUp("nes", apu, NesRead, NesScript(false, heard), NesScript(true, heard), heard, 0, end);
+
+    // NESdev, APU Pulse: these are the eight output bits in time order,
+    // high bit first. A timer-high write restarts that sequence immediately,
+    // while the existing timer still clocks at 400, 800, 1200, ... .
+    const auto checkPulseRestart = [](auto chip, int registerBase) {
+        constexpr int waveform[4] = { 0b01000000, 0b01100000, 0b01111000, 0b10011111 };
+        auto sink = [](std::int64_t) {};
+        for (int duty = 0; duty < 4; ++duty) {
+            auto c = chip;
+            c.Write(registerBase + 0x15, 0x03, sink);
+            for (int channel = 0; channel < 2; ++channel) {
+                const int base = registerBase + 4 * channel;
+                c.Write(base, static_cast<std::uint8_t>((duty << 6) | 0x3F), sink);
+                c.Write(base + 2, 199, sink);
+                c.Write(base + 3, 0, sink);
+            }
+            c.Run(955, sink);
+            c.Write(registerBase + 3, 0, sink);
+            c.Write(registerBase + 7, 0, sink);
+            c.Run(1200, sink);
+            int observed[2] = {};
+            for (int step = 0; step < 8; ++step) {
+                for (int ch = 0; ch < 2; ++ch)
+                    observed[ch] = (observed[ch] << 1) | (c.Out(ch) != 0);
+                c.Run(1201 + 400 * step, sink);
+            }
+            Check(observed[0] == waveform[duty] && observed[1] == waveform[duty],
+                  "pulse retrigger sequence, register " + std::to_string(registerBase) + ", duty " + std::to_string(duty));
+        }
+    };
+    checkPulseRestart(apu, 0x4000);
+    famicom::Mmc5 mmc5;
+    mmc5.Reset();
+    checkPulseRestart(mmc5, 0x5000);
 
     // NESdev, APU Pulse: f = CPU / (16 (t + 1)), duties 12.5, 25, 50 and
     // 25 % negated. APU Triangle: f = CPU / (32 (t + 1)), its 32 steps.
@@ -788,8 +842,11 @@ void TestCartridges() {
         c.Write(0xB001, 0x09, sink), c.Write(0xB002, 0x80, sink);
         c.Run(55, sink); // odd number of clocks into the 14-clock cycle
         c.Write(0xB002, 0x00, sink);
+        c.Run(106, sink);          // five divider clocks pass with E clear
         c.Write(0xB002, 0x80, sink);
-        c.Run(c.Now() + 25, sink); // 2 clocks later -> first addition at clock 2
+        c.Run(120, sink);          // one clock at 110, second at 120
+        Check(c.Out(2) == 0, "vrc6 saw: disabled clocks must leave the phase reset");
+        c.Run(121, sink);
         Check(c.Out(2) == (0x10 >> 3), "vrc6 saw: clearing E did not reset 14-clock phase");
     }
 

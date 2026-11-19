@@ -415,6 +415,57 @@ void TestVoices() {
     }
 }
 
+// Across the hardware pulse floor, Mono must keep gliding on the fallback
+// channel and return to an actual pulse once that register can play the key.
+void TestLegatoRange() {
+    for (int board : { 0, 1 }) {
+        for (int glide : { 0, 250 }) {
+            Controls c = Plain(board);
+            c[kBoards] = 1;
+            c[kMode] = 1;
+            c[kGlide] = glide;
+            c[kAttack] = 750;
+            const auto e = Fresh(c);
+            const std::string which = "board " + std::to_string(board) + ", glide " + std::to_string(glide);
+            Play(*e, { On(0, 45) }, 48000); // A2 on pulse: already at full sustain.
+            const Audio low = Play(*e, { On(0, 21) }, 48000); // A0 needs wave or triangle.
+            const double hz = Measure(low.left, 27.5, 48000.0, 16000, 48000);
+            Check(std::fabs(Cents(hz, 27.5)) < 5.0, which + ": downward legato landed at " + std::to_string(hz) + " Hz");
+            const double full = Rms(low.left, 36000, 48000);
+            Check(full > 0.005 && Rms(low.left, 16000, 22000) > 0.8 * full,
+                  which + ": legato channel handoff restarted the attack");
+
+            const Audio high = Play(*e, { Off(0, 21) }, 48000); // Back to the held A2.
+            const double back = Measure(high.left, 110.0, 48000.0, 16000, 48000);
+            Check(std::fabs(Cents(back, 110.0)) < 5.0, which + ": upward legato landed at " + std::to_string(back) + " Hz");
+            bool pulseActive = false;
+            float l[17], r[17];
+            for (int i = 0; i < 100; ++i) {
+                e->Process(l, r, 17);
+                const Machine& m = e->MachineAt(0);
+                pulseActive |= board == 0 ? (m.HandheldBoard().Chip().Out(0) | m.HandheldBoard().Chip().Out(1)) != 0
+                                          : (m.ConsoleBoard().Apu().Out(0) | m.ConsoleBoard().Apu().Out(1)) != 0;
+            }
+            Check(pulseActive && e->Sounding() == 1, which + ": returning to A2 did not hand the voice back to pulse");
+        }
+    }
+}
+
+// Selecting Arp over an existing chord starts on its lowest key. If that
+// pitch is below even the triangle's register floor, later steps still play.
+void TestArpRange() {
+    Controls c = Plain(1);
+    c[kArpRate] = 6;
+    const auto e = Fresh(c);
+    e->NoteOn(12, 127);
+    e->NoteOn(69, 127);
+    c[kMode] = 2;
+    e->SetControls(c);
+    const Audio a = Play(*e, {}, 48000);
+    Check(Rms(a.left, 6000, 9000) > 0.02 && Rms(a.left, 25500, 27000) > 0.02,
+          "arp: a key outside the console's range silences the higher steps");
+}
+
 void TestModes() {
     // Mono: one voice, legato moves it, and lifting the top key returns to
     // the one under it.
@@ -863,6 +914,8 @@ int main() {
     TestDouble();
     TestVoices();
     TestModes();
+    TestLegatoRange();
+    TestArpRange();
     TestPedalAndPanic();
     TestReset();
     TestEnvelope();

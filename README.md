@@ -34,8 +34,8 @@ on four consoles.
 | 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -15.5 dBFS |
 | 4 | Static Snare | [04-static-snare.wav](Docs/audio/04-static-snare.wav) | 10.8 s | -15.5 dBFS |
 | 5 | Triangle Bass | [05-triangle-bass.wav](Docs/audio/05-triangle-bass.wav) | 8.3 s | -17.9 dBFS |
-| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -19.5 dBFS |
-| 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -19.2 dBFS |
+| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -19.6 dBFS |
+| 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -18.2 dBFS |
 | 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -8.3 dBFS |
 
 <!-- audio-demos-end -->
@@ -47,6 +47,19 @@ Tools/update_readme_blocks.py demos --readme README.md --manifest
 WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
+
+### 0.5.1 — 2026-11-19 — pulse attacks, bass glides and output switching
+
+Console and expansion B pulse notes start on the documented duty sequence.
+Expansion A's saw starts in the same phase after any disabled interval.
+Handheld power-off now reaches the board output at the register-write cycle
+and clears its mixer registers. On both machines the Pin and Line filters
+follow the signal continuously, so changing the monitor tap after silence
+does not replay an earlier transient.
+
+Mono carries its envelope and glide across a channel's pitch limit and
+returns to the selected part when it can play the pitch again. Arp can play
+the next in-range step after an out-of-range starting note.
 
 ### 0.5.0 — 2026-11-19 — hardware blackbox, CPU bus drivers and analog fidelity
 
