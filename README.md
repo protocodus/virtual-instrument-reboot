@@ -248,10 +248,9 @@ be replaced when a source arrives.
 | sibling | a value a closely related unit or board documents, borrowed with the reason it transfers |
 | estimate | a typical part or an engineering judgement, with its reasoning beside it |
 
-No die-level netlist was read, no emulator's code was copied, and no
-copyleft or non-commercial source was read. SameBoy (Expat/MIT), Ayumi (MIT),
-MAME's ay8910 (BSD-3-Clause) and the documents above were read for the
-hardware rules they state; the code is our own.
+The core uses the hardware references above. The record of materials
+reviewed, including the 0.5.1 pulse-sequencer audit, is in the
+[third-party notices](THIRD_PARTY_NOTICES.md).
 
 ### The handheld (Game Boy, Game Boy Color)
 
