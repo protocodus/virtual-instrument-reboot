@@ -775,6 +775,67 @@ void TestTempoLfo() {
     Check(a.left == b.left && a.right == b.right, "free LFO or arp responds to transport");
 }
 
+// Compare the delayed LFO against a zero-delay LFO whose depth a player
+// raises at the expected sample. Both write pitch on the next chip frame.
+void TestTempoLfoDelay() {
+    constexpr int rate = 48000;
+    constexpr double lengths[] = { 0.0, 0.125, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0, 2.0, 4.0 };
+    for (int index = 0; index < 9; ++index) {
+        Controls c = Plain(index % 2);
+        c[kTempoSync] = 1;
+        c[kVibratoDepth] = 100;
+        c[kVibratoDelay] = FromNormalized(kVibratoDelay, index / 8.0);
+        Controls manual = c;
+        manual[kVibratoDepth] = manual[kVibratoDelay] = 0;
+        const auto delayed = Fresh(c, rate, 2), reference = Fresh(manual, rate, 2);
+        constexpr double bpm = 137.0;
+        for (Engine* engine : { delayed.get(), reference.get() }) {
+            engine->SetTransport(bpm, 12.375, true);
+            Play(*engine, {}, 1837);
+            engine->NoteOn(69, 100);
+        }
+        const int due = static_cast<int>(std::ceil(lengths[index] * rate * 60.0 / bpm));
+        const auto attack = Play(*delayed, {}, due, 37);
+        const auto dry = Play(*reference, {}, due, 113);
+        Check(attack.left == dry.left, "early vibrato at delay division " + std::to_string(index));
+        manual[kVibratoDepth] = 100;
+        reference->SetControls(manual);
+        const auto tail = Play(*delayed, {}, 10000, 79);
+        const auto wet = Play(*reference, {}, 10000, 256);
+        Check(tail.left == wet.left, "late vibrato at delay division " + std::to_string(index));
+    }
+
+    Controls c = Plain(0);
+    c[kTempoSync] = 1;
+    c[kVibratoDepth] = 100;
+    c[kVibratoDelay] = FromNormalized(kVibratoDelay, 6.0 / 8.0); // one quarter
+    Controls manual = c;
+    manual[kVibratoDepth] = manual[kVibratoDelay] = 0;
+    const auto delayed = Fresh(c), reference = Fresh(manual);
+    // The first quarter of the delay runs at 90 BPM. The remaining three
+    // quarters take 12,000 samples at 180 BPM, across a seek and a stop.
+    for (Engine* engine : { delayed.get(), reference.get() }) {
+        engine->SetTransport(90, 123.5, true);
+        engine->NoteOn(69, 100);
+    }
+    const auto same = [&](int frames) {
+        return Play(*delayed, {}, frames, 31).left == Play(*reference, {}, frames, 127).left;
+    };
+    Check(same(8000), "early synced vibrato before tempo change");
+    for (Engine* engine : { delayed.get(), reference.get() })
+        engine->SetTransport(180, 123.75, true);
+    Check(same(3500), "tempo change spent the held note's delay early");
+    for (Engine* engine : { delayed.get(), reference.get() })
+        engine->SetTransport(180, 2.25, true);
+    Check(same(4500), "seek changed the held note's elapsed delay");
+    for (Engine* engine : { delayed.get(), reference.get() })
+        engine->SetTransport(180, 2.53125, false);
+    Check(same(4000), "stopped transport completed the delay early");
+    manual[kVibratoDepth] = 100;
+    reference->SetControls(manual);
+    Check(same(7000), "delay failed to finish at the new tempo during stopped audition");
+}
+
 void TestModes() {
     // Mono: one voice, legato moves it, and lifting the top key returns to
     // the one under it.
@@ -1342,6 +1403,7 @@ int main() {
     TestArpChordEdits();
     TestTempoGrid();
     TestTempoLfo();
+    TestTempoLfoDelay();
     TestPedalAndPanic();
     TestReset();
     TestEnvelope();

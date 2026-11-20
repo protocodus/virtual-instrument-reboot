@@ -28,8 +28,8 @@ void Engine::Prepare(double sampleRate, int oversampling) {
     rate_ = Round(sampleRate);
     bpm_ = 120.0;
     beatsPerSample_ = bpm_ / (60.0 * rate_);
-    anchorBeat_ = 0.0;
-    framesFromAnchor_ = 0;
+    elapsedBeat_ = 0.0;
+    AnchorSong(0.0);
     transportPlaying_ = false;
     oversampling_ = oversampling >= 8 ? 8 : oversampling >= 4 ? 4 : oversampling >= 2 ? 2 : 1;
     while (oversampling_ > 1 && rate_ * oversampling_ > kMaxInternalRate)
@@ -89,6 +89,8 @@ void Engine::Apply(bool forceReset) {
     if (tempoSync_) {
         const int division = 7 - Round(7 * ToNormalized(kVibratoRate, c[kVibratoRate]));
         lfoCyclesPerBeat_ = kStepsPerQuarter[division];
+        const int delay = Round(8 * ToNormalized(kVibratoDelay, c[kVibratoDelay]));
+        vibratoDelayBeats_ = delay == 0 ? 0.0 : 1.0 / kStepsPerQuarter[delay - 1];
     }
     bendRange_ = Clamp(Round(c[kBendRange]), 0, 12);
     vibratoDepth_ = c[kVibratoDepth];
@@ -291,10 +293,8 @@ void Engine::NoteOn(int key, int velocity) {
     }
     if (HeldIndex(key) >= 0)
         Lift(key);
-    if (heldCount_ == 0 && tempoSync_ && !transportPlaying_) {
-        anchorBeat_ = 0.0;
-        framesFromAnchor_ = 0;
-    }
+    if (heldCount_ == 0 && tempoSync_ && !transportPlaying_)
+        AnchorSong(0.0);
     held_[heldCount_++] = { key, Clamp(velocity, 1, 127), true };
     Strike(held_[heldCount_ - 1]);
 }
@@ -346,18 +346,26 @@ void Engine::SetTune(double cents) {
     tune_ = next;
 }
 
-double Engine::BeatAt(double frameOffset) const noexcept {
-    return anchorBeat_ + (static_cast<double>(framesFromAnchor_) + frameOffset) * beatsPerSample_;
+double Engine::BeatsSinceAnchor(double frameOffset) const noexcept {
+    return (static_cast<double>(framesFromAnchor_) + frameOffset) * beatsPerSample_;
+}
+
+// The LFO phase follows the song locator. A held note's delay follows time
+// actually played, including through a loop, a seek or a tempo change.
+void Engine::AnchorSong(double songBeat) noexcept {
+    anchorBeat_ = songBeat;
+    elapsedBeatAnchor_ = elapsedBeat_;
+    framesFromAnchor_ = 0;
 }
 
 void Engine::AlignArpGrid() noexcept {
-    nextArpStep_ = std::floor(BeatAt() * arpStepsPerBeat_ + 1.0e-10) + 1.0;
+    nextArpStep_ = std::floor((anchorBeat_ + BeatsSinceAnchor()) * arpStepsPerBeat_ + 1.0e-10) + 1.0;
 }
 
 void Engine::SetTransport(double bpm, double quarterNotePosition, bool playing) {
     if (!(bpm >= 1.0 && bpm <= 1000.0))
         bpm = bpm_;
-    const double predicted = BeatAt();
+    const double predicted = anchorBeat_ + BeatsSinceAnchor();
     // Reason rounds positions to one part in 15,360 of a beat. Preserve the
     // sample anchor across that rounding when consecutive batches agree.
     const bool hasPosition = playing && std::isfinite(quarterNotePosition)
@@ -365,8 +373,7 @@ void Engine::SetTransport(double bpm, double quarterNotePosition, bool playing) 
     const double difference = hasPosition ? std::fabs(quarterNotePosition - predicted) : 0.0;
     const bool seek = hasPosition && (!transportPlaying_ || difference > 1.0 / 128.0);
     if (bpm != bpm_ || seek || difference > 1.0 / 15360.0) {
-        anchorBeat_ = hasPosition ? quarterNotePosition : predicted;
-        framesFromAnchor_ = 0;
+        AnchorSong(hasPosition ? quarterNotePosition : predicted);
         bpm_ = bpm;
         beatsPerSample_ = bpm / (60.0 * rate_);
     }
@@ -536,6 +543,7 @@ int Engine::StartNote(int key, int velocity, bool maySteal) {
     n.voice = part.voice;
     n.fallback = fallback;
     n.age = ++age_;
+    n.startBeat = elapsedBeat_;
     // A note at sustain 0 keeps its channel while the key holds it, silent,
     // so that raising the sustain brings it back.
     Settle(n);
@@ -672,7 +680,7 @@ void Engine::AdvanceSoftwareEnvelopes() {
 double Engine::Pitch(const Slot& n, double cents) const {
     double semitones = n.key + transpose_ + (fine_ + cents + tune_) / 100.0 + n.glide + bend_ * bendRange_;
     const double depth = vibratoDepth_ + 50.0 * wheel_;
-    if (depth > 0.0 && n.frames > vibratoDelay_)
+    if (depth > 0.0 && (tempoSync_ || n.frames > vibratoDelay_))
         semitones += depth / 100.0 * std::sin(6.283185307179586 * n.phase);
     return 440.0 * std::pow(2.0, (semitones - 69.0) / 12.0);
 }
@@ -798,6 +806,9 @@ int Engine::FramesUntilArpStep(int frames) {
 // The free arp, envelope, glide and pitch modulation write the machine's
 // registers on video frames. The synced arp strikes on the song grid.
 void Engine::Tick(std::int64_t cycle) {
+    const double frame = static_cast<double>(machines_[0].FrameAt(cycle)) / oversampling_;
+    const double beats = BeatsSinceAnchor(frame);
+    elapsedBeat_ = elapsedBeatAnchor_ + beats;
     int restarted = -1;
     if (!tempoSync_ && mode_ == 2 && heldCount_ > 0 && ++arpCount_ >= arpRate_) {
         arpCount_ = 0;
@@ -806,8 +817,7 @@ void Engine::Tick(std::int64_t cycle) {
     }
     double songPhase = 0.0;
     if (tempoSync_) {
-        const double frame = static_cast<double>(machines_[0].FrameAt(cycle)) / oversampling_;
-        const double cycles = BeatAt(frame) * lfoCyclesPerBeat_;
+        const double cycles = (anchorBeat_ + beats) * lfoCyclesPerBeat_;
         songPhase = cycles - std::floor(cycles);
     }
     int writes[kSlots];
@@ -817,13 +827,11 @@ void Engine::Tick(std::int64_t cycle) {
         if (!n.busy)
             continue;
         ++n.frames;
-        if (n.frames > vibratoDelay_) {
-            if (tempoSync_) {
-                n.phase = songPhase;
-            } else {
-                n.phase += vibratoStep_;
-                n.phase -= std::floor(n.phase);
-            }
+        if (tempoSync_) {
+            n.phase = elapsedBeat_ >= n.startBeat + vibratoDelayBeats_ ? songPhase : 0.0;
+        } else if (n.frames > vibratoDelay_) {
+            n.phase += vibratoStep_;
+            n.phase -= std::floor(n.phase);
         }
         if (n.glideLeft > 0) {
             n.glide -= n.glide / n.glideLeft;
@@ -921,6 +929,7 @@ void Engine::Process(float* left, float* right, int frames) {
             right[i] = frame[1];
         }
         framesFromAnchor_ += n;
+        elapsedBeat_ = elapsedBeatAnchor_ + BeatsSinceAnchor();
         left += n, right += n, frames -= n;
     }
 }

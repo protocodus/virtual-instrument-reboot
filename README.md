@@ -42,6 +42,10 @@ WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
 
+### 0.6.1 — 2026-11-20 — tempo-synced vibrato delay
+
+With Sync on, Vibrato Delay sets how long a newly played voice waits before vibrato starts. Turn it fully counterclockwise for immediate vibrato, or choose a note length from 1/32 to 1/1. A tempo change during the wait adjusts the remaining duration. With Sync off, Delay uses the original 0–1000 ms range.
+
 ### 0.6.0 — 2026-11-20 — song tempo and envelope modes
 
 Sync locks the arpeggiator and vibrato LFO to the host’s tempo and song position. Each rate control independently selects a note division from 1/32 through a whole note, including eighth- and quarter-note triplets. Stopped transport supports live audition at the song tempo.
@@ -457,9 +461,9 @@ machine blackbox.
 | Attack, Decay, Release | 0 to 5000 ms | the envelope's times |
 | Transpose, Fine, Mod | ±24 semitones, ±50 cents, 0 to 63 | pitch, and the disk unit's modulation depth |
 | Mode | Poly, Mono, Arp | how keys take voices |
-| Sync | Off, On | follows song tempo and position for both Arp and Vibrato |
+| Sync | Off, On | clocks the arp rate, vibrato rate and vibrato onset delay from song tempo |
 | Arp rate | 1 to 8 frames, or synced divisions | duration of each arp step |
-| Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz or synced divisions, 0 to 1000 ms | written at the frame; the mod wheel adds up to 50 cents |
+| Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz or synced divisions, 0 to 1000 ms or zero to a whole note | written at the frame; the mod wheel adds up to 50 cents |
 | Glide | 0 to 1000 ms | a Mono legato note's slide |
 | Bend range | 0 to 12 semitones | the pitch wheel |
 | Velocity | 0 to 1 | how far a key's velocity scales the level |

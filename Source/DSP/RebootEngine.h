@@ -119,6 +119,7 @@ private:
         double glide = 0.0;      // semitones still to go
         int glideLeft = 0;       // frames to go
         int frames = 0;          // frames since the note began
+        double startBeat = 0.0;  // elapsed musical time when the channel started
         double phase = 0.0;      // vibrato, in cycles
         std::uint64_t age = 0;   // when it began, or was freed
         ChannelSettings written;
@@ -161,7 +162,8 @@ private:
     void Tick(std::int64_t cycle);
     void PlayArpKey(const Key& next);
     int FramesUntilArpStep(int frames);
-    [[nodiscard]] double BeatAt(double frameOffset = 0.0) const noexcept;
+    [[nodiscard]] double BeatsSinceAnchor(double frameOffset = 0.0) const noexcept;
+    void AnchorSong(double songBeat) noexcept;
     void AlignArpGrid() noexcept;
     [[nodiscard]] const Key& NextArpKey(int after) const noexcept;
     [[nodiscard]] int HeldIndex(int key) const noexcept;
@@ -194,7 +196,10 @@ private:
     int arpKey_ = 0, arpCount_ = 0;
     bool tempoSync_ = false, transportPlaying_ = false;
     double bpm_ = 120.0, beatsPerSample_ = 2.0 / 48000.0;
-    double anchorBeat_ = 0.0;
+    double anchorBeat_ = 0.0;          // song position, which can jump on a seek
+    double elapsedBeatAnchor_ = 0.0;   // elapsed quarter notes at that same sample
+    double elapsedBeat_ = 0.0;         // elapsed quarter notes at the current event
+    double vibratoDelayBeats_ = 0.0;
     std::int64_t framesFromAnchor_ = 0;
     double arpStepsPerBeat_ = 4.0, lfoCyclesPerBeat_ = 3.0, nextArpStep_ = 1.0;
     std::int64_t tickNum_ = 0, periodNum_ = 1, periodDen_ = 1;
