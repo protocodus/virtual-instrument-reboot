@@ -156,10 +156,13 @@ private:
                 if (p.enabled)
                     p.step = static_cast<std::uint8_t>((p.step - k) & 15);
             }
-        // Silent means disabled, or rate 0 with the accumulator at 0, so
-        // the accumulator stays where it is.
-        if (!saw_.live)
-            saw_.clocks = static_cast<std::uint8_t>((saw_.clocks + saw_.timer.CatchUp(now_)) % 14);
+        // The divider keeps running with E clear, but the accumulator
+        // sequencer stays reset. At rate zero with E set it still clocks.
+        if (!saw_.live) {
+            const std::int64_t k = saw_.timer.CatchUp(now_);
+            if (saw_.enabled)
+                saw_.clocks = static_cast<std::uint8_t>((saw_.clocks + k) % 14);
+        }
     }
 
     bool Update() noexcept {

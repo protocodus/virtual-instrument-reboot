@@ -123,8 +123,13 @@ public:
                 waveRam_[wave_.position >> 1] = value;
         } else if (address == 0xFF26) {
             const bool on = (value & 0x80) != 0;
-            if (!on && power_)
+            if (!on && power_) {
                 PowerOff();
+                // PowerOff clears the DAC and output caches together with
+                // their registers. The board needs the edge at this cycle.
+                sink(now_);
+                return;
+            }
             // gbdev wiki, Power control: powering on resets the sequencer so
             // its next step is 0, and clears the wave sample buffer.
             if (on && !power_) {
@@ -576,6 +581,8 @@ private:
         model_ = model;
         now_ = now, divDue_ = divDue, divStep_ = divStep;
         power_ = false;
+        nr50_ = lastNr50_ = 0;
+        nr51_ = lastNr51_ = 0;
         for (int i = 0; i < 16; ++i)
             waveRam_[i] = ram[i];
         if (model_ == Model::Dmg) {

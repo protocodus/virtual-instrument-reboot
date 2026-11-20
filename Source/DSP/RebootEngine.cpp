@@ -290,7 +290,7 @@ void Engine::Strike(int key, int velocity) {
         break;
     case 1:
         if (mono_ >= 0 && slots_[mono_].gate) {
-            Retarget(mono_, key, velocity, true);
+            Retarget(key, velocity, true);
         } else {
             if (mono_ >= 0)
                 End(mono_);
@@ -334,7 +334,7 @@ void Engine::Lift(int key) {
         } else {
             const Key& top = held_[heldCount_ - 1];
             if (slots_[mono_].key != top.key)
-                Retarget(mono_, top.key, top.velocity, true);
+                Retarget(top.key, top.velocity, true);
         }
         break;
     default:
@@ -398,21 +398,14 @@ int Engine::StartNote(int key, int velocity) {
     return best;
 }
 
-// A legato move of a Mono or Arp note to `key`, gliding from where it is
-// when asked; on a channel that cannot reach the key, a new note.
-void Engine::Retarget(int slot, int key, int velocity, bool glide) {
-    Slot& n = slots_[slot];
+// A legato move of a Mono or Arp note to `key`, gliding from its current pitch.
+void Engine::Retarget(int key, int velocity, bool glide) {
+    Slot& n = slots_[mono_];
     const double offset = glide && glideFrames_ > 0 ? n.key + n.glide - key : 0.0;
     n.key = key, n.velocity = velocity;
     n.glide = offset;
     n.glideLeft = offset != 0.0 ? glideFrames_ : 0;
-    ChannelSettings s;
-    if (!Compose(slot, s, -Spread())) {
-        End(slot);
-        mono_ = StartNote(key, velocity);
-        return;
-    }
-    Send(slot, s, false);
+    WriteMono();
 }
 
 // The envelope from the start, as a new note's: the arpeggio's steps.
@@ -554,6 +547,38 @@ void Engine::Write(int slot) {
     Send(slot, s, false);
 }
 
+// Mono and Arp own one voice. When its current pitch crosses a register
+// limit, hand the same envelope, glide and vibrato to a channel of the same
+// physical machine. Return to the selected part as soon as it is in range.
+void Engine::WriteMono() {
+    const Machine& m = machines_[BoardOf(mono_)];
+    const Part primary = m.PartOf(part_);
+    const int ch = Channel(mono_);
+    const bool onPrimary = ch >= primary.first && ch < primary.first + primary.count;
+    ChannelSettings s;
+    const bool fits = Compose(mono_, s, -Spread());
+    if (!onPrimary || !fits) {
+        const Part destination = onPrimary ? m.FallbackOf(primary) : primary;
+        std::int64_t period;
+        if (destination.count > 0 && m.PeriodFor(destination.first, destination.voice, Pitch(slots_[mono_], -Spread()),
+                                                  shape_ % m.Shapes(destination.first, destination.voice), period)) {
+            const int next = BoardOf(mono_) * Machine::kMaxChannels + destination.first;
+            slots_[next] = slots_[mono_];
+            slots_[next].voice = destination.voice;
+            End(mono_);
+            mono_ = next;
+            Compose(next, s, -Spread());
+            Send(next, s, true);
+            return;
+        }
+        // Beyond both parts' ranges, keep following the key in silence so
+        // its glide, bend or a later legato key can bring the voice back.
+        if (!fits)
+            s.volume = 0;
+    }
+    Send(mono_, s, false);
+}
+
 // The machines' frame: the arpeggio, whose every step starts the envelope
 // again, then each note's envelope, glide, vibrato and pitch wheel.
 void Engine::Tick() {
@@ -565,9 +590,11 @@ void Engine::Tick() {
         const int velocity = held_[HeldIndex(key)].velocity;
         if (mono_ >= 0 && slots_[mono_].gate) {
             Restart(slots_[mono_]);
-            Retarget(mono_, key, velocity, false);
-            restarted = mono_;
+            Retarget(key, velocity, false);
+        } else {
+            mono_ = StartNote(key, velocity);
         }
+        restarted = mono_;
     }
     for (int s = 0; s < boards_ * Machine::kMaxChannels; ++s) {
         Slot& n = slots_[s];
@@ -589,8 +616,13 @@ void Engine::Tick() {
             End(s);
             continue;
         }
-        Write(s);
+        if (s != mono_)
+            Write(s);
     }
+    // A channel handoff can change mono_'s slot. Write it after stepping
+    // the envelopes so the moved note never advances twice on one frame.
+    if (mono_ >= 0)
+        WriteMono();
 }
 
 void Engine::Process(float* left, float* right, int frames) {

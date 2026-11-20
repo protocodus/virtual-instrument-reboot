@@ -29,6 +29,15 @@ that uses it.
   the NESdev forum (threads t=17741 and t=24288): the 5B's level against
   the APU and the APU's DAC curves.
 
+During the 0.5.1 pulse audit a reviewer viewed an excerpt of Mesen2's
+square-channel header, contrary to this project's source-review rule.
+A second reviewer independently reconstructed all 32 lookup entries from
+Reboot 0.5.0's existing time-order waveforms and the counter direction in
+the [NESdev APU Pulse reference](https://www.nesdev.org/wiki/APU_Pulse#Implementation_details).
+The result matches the committed table byte for byte. The regression
+exercises those waveforms through Reboot's public register interface.
+No emulator implementation was incorporated.
+
 No ROM image, game music data or recording is part of this repository.
 Game Boy, NES and Famicom are trademarks of their owners, named only to
 identify the hardware emulated.

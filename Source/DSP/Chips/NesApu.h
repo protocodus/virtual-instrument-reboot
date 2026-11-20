@@ -38,13 +38,13 @@ constexpr std::uint8_t kLength[32] = {
     12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30,
 };
 
-// APU Pulse: the four duty sequences as the sequencer reads them, step 0
-// first; the sequencer counts down (0, 7, 6, ... 1).
+// NESdev, APU Pulse, "Implementation details": the counter indexes these
+// rows in the order 0, 7, 6, ... 1. In time, duty 0 is 01000000.
 constexpr std::uint8_t kDuty[4][8] = {
-    { 0, 1, 0, 0, 0, 0, 0, 0 },
-    { 0, 1, 1, 0, 0, 0, 0, 0 },
-    { 0, 1, 1, 1, 1, 0, 0, 0 },
-    { 1, 0, 0, 1, 1, 1, 1, 1 },
+    { 0, 0, 0, 0, 0, 0, 0, 1 },
+    { 0, 0, 0, 0, 0, 0, 1, 1 },
+    { 0, 0, 0, 0, 1, 1, 1, 1 },
+    { 1, 1, 1, 1, 1, 1, 0, 0 },
 };
 
 // APU Triangle: the 32-step sequence.

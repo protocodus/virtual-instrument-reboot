@@ -133,7 +133,7 @@ private:
     void Strike(int key, int velocity);
     void Lift(int key);
     int StartNote(int key, int velocity);
-    void Retarget(int slot, int key, int velocity, bool glide);
+    void Retarget(int key, int velocity, bool glide);
     void Restart(Slot& n) const noexcept;
     void ReleaseSlot(int slot);
     void End(int slot);
@@ -146,6 +146,7 @@ private:
     bool Compose(int slot, ChannelSettings& s, double cents = 0.0) const;
     void Send(int slot, const ChannelSettings& s, bool start);
     void Write(int slot);
+    void WriteMono();
     void Tick();
     [[nodiscard]] int ArpKey(int index) const noexcept;
     [[nodiscard]] int HeldIndex(int key) const noexcept;

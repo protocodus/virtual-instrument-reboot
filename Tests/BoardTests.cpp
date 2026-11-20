@@ -449,6 +449,34 @@ void TestRestAfterReset(Machine& m) {
             }
 }
 
+// Selecting another jack on a running board must reveal the signal already
+// there, including its filter history. Compare the first samples after
+// switching to a separate run monitored at that jack throughout.
+void TestMonitorPathSwitch(Machine& m) {
+    for (const Setup& setup : Setups()) {
+        for (Path destination : { Path::Pin, Path::Line }) {
+            const Path other = destination == Path::Pin ? Path::Line : Path::Pin;
+            const auto capture = [&](Path initial) {
+                m.Prepare(kRate);
+                m.Reset(setup.settings);
+                m.Start(0, Note(m, 0, Voice::Pulse, 130.81, 0));
+                m.SetBias(127);
+                for (int block = 0; block < 64; ++block) {
+                    float left[256] {}, right[256] {};
+                    m.Render(256, initial, left, right);
+                }
+                Render r { std::vector<float>(256), std::vector<float>(256) };
+                m.Render(256, destination, r.left.data(), r.right.data());
+                return r;
+            };
+            const Render steady = capture(destination), switched = capture(other);
+            Check(steady.left == switched.left && steady.right == switched.right,
+                  std::string(setup.name) + (destination == Path::Line ? " switching to Line" : " switching to Pin")
+                      + " must preserve the output circuit's history");
+        }
+    }
+}
+
 } // namespace
 
 // The two generated kernels, measured from their coefficients. The step
@@ -680,6 +708,7 @@ int main() {
     TestNoise(*machine);
     TestStopAndRates(*machine);
     TestRestAfterReset(*machine);
+    TestMonitorPathSwitch(*machine);
     TestBlackboxBus();
     if (failures == 0)
         std::printf("Reboot.Boards: all checks passed\n");

@@ -158,14 +158,12 @@ public:
                 dacResidual_[side] = dacFadeFactor_ * (dacResidual_[side] + static_cast<double>(offDelta[side][i]));
                 if (dacResidual_[side] > -1.0e-15 && dacResidual_[side] < 1.0e-15)
                     dacResidual_[side] = 0.0;
-                double y;
-                if (path == Path::Line) {
-                    const double in = static_cast<double>(bus[side][i]) + dacResidual_[side];
-                    y = amplifier_[side].Process(capacitor_[side].Process(in));
-                } else {
-                    y = pinBlocker_[side].Process(bus[side][i]);
-                }
-                out[side][i] += static_cast<float>(y);
+                // The selector monitors one of two live taps. Both sets
+                // of capacitors stay charged as the board plays.
+                const double pin = pinBlocker_[side].Process(bus[side][i]);
+                const double in = static_cast<double>(bus[side][i]) + dacResidual_[side];
+                const double line = amplifier_[side].Process(capacitor_[side].Process(in));
+                out[side][i] += static_cast<float>(path == Path::Line ? line : pin);
             }
         }
         tb_.Advance(frames);
