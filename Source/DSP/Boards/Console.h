@@ -78,19 +78,42 @@
 #include "../Chips/NesApu.h"
 #include "Board.h"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace protocodus::reboot {
 
 class Console {
+    // The curve's table runs to 32 times the threshold, past the loudest
+    // sum the APU and three 5B squares can reach (about 16); beyond, it
+    // continues along its last step.
+    static constexpr int kCurveSteps = 496;
+    static constexpr double kCurveTop = 32.0;
+
 public:
     enum Revision { kFrontLoader, kFamicom, kPal, kRevisions };
     enum Cartridge { kNone, kVrc6, kMmc5, kN163, kFds, k5B, kCartridges };
     static constexpr double kPulse15 = 95.88 / (8128.0 / 15.0 + 100.0);
 
-    // Setup.
-    void Prepare(int sampleRate) {
+    // The cartridge's compression curve does not depend on the sample rate
+    // or board. An engine prepares it once for all its machines.
+    using Curve5B = std::array<double, kCurveSteps + 1>;
+    static Curve5B Make5BCurve() {
+        Curve5B levels {};
+        for (int i = 0; i <= kCurveSteps; ++i)
+            levels[i] = std::pow(1.0 + i * (kCurveTop - 1.0) / kCurveSteps, 1.0 / 2.7);
+        return levels;
+    }
+
+    void Prepare(int sampleRate) { Prepare(sampleRate, Make5BCurve()); }
+
+    void Prepare(int sampleRate, const Curve5B& levels) {
+        curve5B_ = levels;
+        frontHighPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::HighPass, 90.0, sampleRate);
+        famicomHighPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::HighPass, 37.0, sampleRate);
+        frontLowPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::LowPass, 14000.0, sampleRate);
         rate_ = sampleRate;
         DesignPinBlocker(pinBlocker_, sampleRate);
         // Reported: NESdev "FDS audio" (~2 kHz RC low-pass) + Yuri213212's
@@ -104,10 +127,6 @@ public:
         s5bApuIn_.Design(FirstOrder::Kind::HighPass, 12.0, sampleRate);
         s5bInternal_.Design(FirstOrder::Kind::HighPass, 20.0, sampleRate);
         s5bOut_.Design(FirstOrder::Kind::HighPass, 12.0, sampleRate);
-        // The 5B's curve above its threshold, (|x| / T)^(1 / 2.7), tabled here
-        // so no library call runs per sample.
-        for (int i = 0; i <= kCurveSteps; ++i)
-            curve5B_[i] = std::pow(1.0 + i * (kCurveTop - 1.0) / kCurveSteps, 1.0 / 2.7);
     }
 
     void Reset(int revision, int cartridge) noexcept {
@@ -127,11 +146,10 @@ public:
         s5bApuIn_.Reset();
         s5bInternal_.Reset();
         s5bOut_.Reset();
-        highPass_.Design(FirstOrder::Kind::HighPass, revision == kFamicom ? 37.0 : 90.0, rate_);
-        if (revision == kFamicom)
-            lowPass_.Design(FirstOrder::Kind::Pass, 0.0, rate_);
-        else
-            lowPass_.Design(FirstOrder::Kind::LowPass, 14000.0, rate_);
+        const bool famicom = revision == kFamicom;
+        highPass_.SetCoefficients(FirstOrder::Kind::HighPass, famicom ? famicomHighPass_ : frontHighPass_);
+        lowPass_.SetCoefficients(famicom ? FirstOrder::Kind::Pass : FirstOrder::Kind::LowPass,
+                                 famicom ? FirstOrder::Coefficients {} : frontLowPass_);
         highPass_.Reset();
         lowPass_.Reset();
 
@@ -142,7 +160,6 @@ public:
         s5b_.Reset(16, true);
         s5bAddr_ = 0;
         fdsMaster_ = 0;
-        fdsPending_ = 0;
 
         ApuChanged(0);
         CartChanged(0);
@@ -179,8 +196,16 @@ public:
     // resulting rest levels (the triangle's held first step and the DMC's Bias),
     // and aligns the sample block origin to the current cycle.
     void FinishBoot() noexcept {
-        if (!bus_.Empty())
-            RunTo(bus_.LastCycle() + 1);
+        if (!bus_.Empty()) {
+            const auto end = bus_.LastCycle() + 1;
+            // Keep even a long initialization sequence inside the sample buffer.
+            // The host starts listening only after FinishBoot settles the filters.
+            while (end > tb_.CycleAt(StepBuffer::kMaxFrames)) {
+                float discard[StepBuffer::kMaxFrames] {};
+                Render(StepBuffer::kMaxFrames, Path::Pin, discard, discard);
+            }
+            RunTo(end);
+        }
         SettleOutputStages();
         const nes::Clock clock = nes::kCpuClock[revision_ == kPal ? 1 : 0];
         tb_.SetAt(apu_.Now(), clock.numerator, clock.denominator, rate_);
@@ -212,12 +237,8 @@ public:
         // Bus 0 is the APU and every cartridge but the disk unit and the 5B;
         // bus 1 is one of those two.
         for (int i = 0; i < frames; ++i) {
-            while (fdsPending_ > 0 && fdsQueue_[0].sample <= i) {
-                fdsLowPass_.SetCoefficients(FirstOrder::Kind::LowPass, fdsLowPassCoeffs_[fdsQueue_[0].master]);
-                for (int k = 1; k < fdsPending_; ++k)
-                    fdsQueue_[k - 1] = fdsQueue_[k];
-                --fdsPending_;
-            }
+            if (i < fdsScheduleLength_ && fdsSchedule_[i] != 0)
+                fdsLowPass_.SetCoefficients(FirstOrder::Kind::LowPass, fdsLowPassCoeffs_[fdsSchedule_[i] - 1]);
             const double cart = cartridge_ == kFds ? fdsLowPass_.Process(bus[1][i]) : bus[1][i];
             // Path selects the tap to hear. The pin blocker and the
             // cartridge/line circuitry continue to see the same board.
@@ -233,8 +254,13 @@ public:
             left[i] += output;
             right[i] += output;
         }
-        for (int k = 0; k < fdsPending_; ++k)
-            fdsQueue_[k].sample -= frames;
+        if (fdsScheduleLength_ > 0) {
+            // Only the BLEP delay can carry changes across this block boundary.
+            const int remaining = fdsScheduleLength_ > frames ? fdsScheduleLength_ - frames : 0;
+            std::memmove(fdsSchedule_.data(), fdsSchedule_.data() + frames, remaining);
+            std::memset(fdsSchedule_.data() + remaining, 0, fdsScheduleLength_ - remaining);
+            fdsScheduleLength_ = remaining;
+        }
         tb_.Advance(frames);
     }
 
@@ -307,7 +333,8 @@ private:
         // through the Pin blocker on every reset.
         const double apu = mix_.Land(0), other = mix_.Land(1);
         fdsMaster_ = fds_.MasterVolume() & 3;
-        fdsPending_ = 0;
+        fdsSchedule_.fill(0);
+        fdsScheduleLength_ = 0;
         fdsLowPass_.SetCoefficients(FirstOrder::Kind::LowPass, fdsLowPassCoeffs_[fdsMaster_]);
         fdsLowPass_.Settle(other);
         pinBlocker_.Settle(apu + other);
@@ -354,9 +381,10 @@ private:
             if (m != fdsMaster_) {
                 fdsMaster_ = m;
                 const int sample = static_cast<int>(position >> StepBuffer::kSubBits) + blep::kDelay;
-                if (fdsPending_ == kFdsQueue)
-                    --fdsPending_;
-                fdsQueue_[fdsPending_++] = { sample, m };
+                // Several writes can land on one sample. Only its final setting
+                // reaches the RC, while the DAC steps retain their sub-sample times.
+                fdsSchedule_[sample] = static_cast<std::uint8_t>(m + 1);
+                fdsScheduleLength_ = sample + 1;
             }
             level = fds_.Out() * kFdsStep * kMaster[m];
             bus = 1;
@@ -405,12 +433,6 @@ private:
     // The 5B amplifier's threshold: a code-29 (volume 14) square's peak once
     // centred, half its swing, plus 1 dB: 10^(-2 / 20) / 2 of code 31.
     static constexpr double k5BKnee = k5BFull * 0.3971641173621406;
-    // The curve's table runs to 32 times the threshold, past the loudest
-    // sum the APU and three 5B squares can reach (about 16); beyond, it
-    // continues along its last step.
-    static constexpr int kCurveSteps = 496;
-    static constexpr double kCurveTop = 32.0;
-
     [[nodiscard]] double Amplify5B(double x) const noexcept {
         const double a = x < 0.0 ? -x : x;
         if (a <= k5BKnee)
@@ -422,12 +444,6 @@ private:
         const double y = k5BKnee * (curve5B_[i] + (u - i) * (curve5B_[i + 1] - curve5B_[i]));
         return x < 0.0 ? -y : y;
     }
-
-    static constexpr int kFdsQueue = 32;
-    struct FdsMasterEvent {
-        int sample;
-        int master;
-    };
 
     int rate_ = 48000;
     int revision_ = kFrontLoader;
@@ -446,9 +462,10 @@ private:
     FirstOrder pinBlocker_, fdsLowPass_, highPass_, lowPass_;
     FirstOrder::Coefficients fdsLowPassCoeffs_[4] {};
     FirstOrder mmc5Board_, s5bApuIn_, s5bInternal_, s5bOut_;
-    double curve5B_[kCurveSteps + 1] {};
-    int fdsMaster_ = 0, fdsPending_ = 0;
-    FdsMasterEvent fdsQueue_[kFdsQueue] {};
+    FirstOrder::Coefficients frontHighPass_, famicomHighPass_, frontLowPass_;
+    Curve5B curve5B_ {};
+    int fdsMaster_ = 0, fdsScheduleLength_ = 0;
+    std::array<std::uint8_t, StepBuffer::kMaxFrames + blep::kDelay + 1> fdsSchedule_ {};
 };
 
 } // namespace protocodus::reboot

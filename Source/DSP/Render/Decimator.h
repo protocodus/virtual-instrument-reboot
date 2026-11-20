@@ -68,4 +68,52 @@ private:
     int stages_ = 0;
 };
 
+// After identical stereo input has filled every FIR history, the filtered
+// channels are identical too. Run a single FIR chain until stereo returns.
+class StereoDecimator {
+public:
+    void Prepare(int factor) noexcept {
+        factor_ = factor;
+        left_.Prepare(factor);
+        right_.Prepare(factor);
+        equalFrames_ = kFlush;
+    }
+
+    void Reset() noexcept {
+        left_.Reset();
+        right_.Reset();
+        equalFrames_ = kFlush;
+    }
+
+    void Process(float* left, float* right, int frames) noexcept {
+        if (factor_ == 1)
+            return;
+        const bool equal = std::memcmp(left, right, sizeof(float) * static_cast<std::size_t>(frames * factor_)) == 0;
+        if (equal && equalFrames_ == kFlush) {
+            left_.Process(left, frames);
+            std::memcpy(right, left, sizeof(float) * static_cast<std::size_t>(frames));
+            return;
+        }
+        if (!equal) {
+            if (equalFrames_ == kFlush)
+                right_ = left_;
+            equalFrames_ = 0;
+        } else {
+            equalFrames_ += frames;
+            if (equalFrames_ > kFlush)
+                equalFrames_ = kFlush;
+        }
+        left_.Process(left, frames);
+        right_.Process(right, frames);
+    }
+
+private:
+    // The oldest input at the last output is less than 66 host samples
+    // back even with three stages: 66 * (1/2 + 1/4 + 1/8).
+    static constexpr int kFlush = 2 * halfband::kHalfLength;
+    int factor_ = 1;
+    int equalFrames_ = kFlush;
+    Decimator left_, right_;
+};
+
 } // namespace protocodus::reboot

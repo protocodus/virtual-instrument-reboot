@@ -43,9 +43,11 @@ public:
     static constexpr int kMaxChannels = ConsoleDriver::kMaxChannels;
     static constexpr int kParts = 5;
 
-    void Prepare(int sampleRate) {
+    void Prepare(int sampleRate) { Prepare(sampleRate, Console::Make5BCurve()); }
+
+    void Prepare(int sampleRate, const Console::Curve5B& levels) {
         handheld_.Prepare(sampleRate);
-        console_.Prepare(sampleRate);
+        console_.Prepare(sampleRate, levels);
     }
 
     void Reset(const MachineSettings& s) {

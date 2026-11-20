@@ -34,7 +34,7 @@ on four consoles.
 | 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -15.5 dBFS |
 | 4 | Static Snare | [04-static-snare.wav](Docs/audio/04-static-snare.wav) | 10.8 s | -15.5 dBFS |
 | 5 | Triangle Bass | [05-triangle-bass.wav](Docs/audio/05-triangle-bass.wav) | 8.3 s | -17.9 dBFS |
-| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -19.6 dBFS |
+| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -19.5 dBFS |
 | 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -18.2 dBFS |
 | 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -8.3 dBFS |
 
@@ -47,6 +47,12 @@ Tools/update_readme_blocks.py demos --readme README.md --manifest
 WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
+
+### 0.5.2 — 2026-11-20 — held notes and rendering cost
+
+Releasing the sustain pedal in Mono keeps the tail on the last sounding pitch. In Poly, a pitch bend can carry a held note across the selected channel’s range onto an available fallback. Editing a chord during an arpeggio advances from the last sounding pitch. Cartridge settings can be saved on an inactive board without restarting a held note.
+
+Mono passages share the oversampling filters once both channels have the same history. The band-limited step renderer processes only pending filter tails. Disk master-volume writes reach the output filter at the same sample across different callback sizes.
 
 ### 0.5.1 — 2026-11-19 — pulse attacks, bass glides and output switching
 

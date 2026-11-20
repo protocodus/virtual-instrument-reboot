@@ -26,20 +26,20 @@ void Engine::Prepare(double sampleRate, int oversampling) {
     oversampling_ = oversampling >= 8 ? 8 : oversampling >= 4 ? 4 : oversampling >= 2 ? 2 : 1;
     while (oversampling_ > 1 && rate_ * oversampling_ > kMaxInternalRate)
         oversampling_ /= 2;
+    const auto curve5B = Console::Make5BCurve();
     for (Machine& m : machines_)
-        m.Prepare(rate_ * oversampling_);
+        m.Prepare(rate_ * oversampling_, curve5B);
     for (Machine& m : twins_)
-        m.Prepare(rate_ * oversampling_);
-    for (Decimator& d : decimators_)
-        d.Prepare(oversampling_);
+        m.Prepare(rate_ * oversampling_, curve5B);
+    decimator_.Prepare(oversampling_);
     stage_.Prepare(static_cast<double>(rate_));
     for (Slot& s : slots_)
         s = Slot {};
     heldCount_ = 0;
     pedal_ = false;
     bend_ = wheel_ = 0.0;
-    Apply(true, true);
-    trimHeard_ = trim_;
+    Apply(true);
+    trimFramesLeft_ = 0;
 }
 
 void Engine::SetControls(const Controls& raw) {
@@ -52,22 +52,20 @@ void Engine::SetControls(const Controls& raw) {
         if (!(v >= info.min && v <= info.max))
             c[i] = v != v ? info.initial : v < info.min ? info.min : info.max;
     }
-    const Controls old = controls_;
+    if (c.value == controls_.value)
+        return;
+    retryPitch_ |= c[kTranspose] != controls_[kTranspose] || c[kFine] != controls_[kFine]
+        || c[kBendRange] != controls_[kBendRange] || c[kDetune] != controls_[kDetune];
     controls_ = c;
-    const auto changed = [&](int i) { return old[i] != c[i]; };
-    const bool reset = changed(kBoard) || changed(kRevision) || changed(kExpansion) || changed(kExpansionChannels)
-        || changed(kBoards) || changed(kDouble);
-    Apply(reset, reset || changed(kMode) || changed(kPart));
-    if (changed(kBias) && !reset)
-        for (int b = 0; b < boards_; ++b) {
-            machines_[b].SetBias(settings_.bias);
-            twins_[b].SetBias(settings_.bias);
-        }
+    Apply(false);
 }
 
-// Reads the controls; with `reset` starts the machines again first, and with
-// `revoice` plays the held keys again.
-void Engine::Apply(bool reset, bool revoice) {
+// Compare the effective hardware. A stored setting of an absent cartridge
+// must not reset the clock, silence the release tails or retrigger held keys.
+void Engine::Apply(bool forceReset) {
+    const MachineSettings old = settings_;
+    const int oldBoards = boards_, oldMode = mode_, oldPart = part_;
+    const bool wasDouble = double_;
     const Controls& c = controls_;
     mode_ = Clamp(Round(c[kMode]), 0, 2);
     arpRate_ = Clamp(Round(c[kArpRate]), 1, 8);
@@ -85,12 +83,18 @@ void Engine::Apply(bool reset, bool revoice) {
     mod_ = Clamp(Round(c[kMod]), 0, 63);
 
     settings_.board = static_cast<BoardKind>(Clamp(Round(c[kBoard]), 0, static_cast<int>(BoardKind::Count) - 1));
-    settings_.revision = Clamp(Round(c[kRevision]), 0, 2);
-    settings_.expansion = Clamp(Round(c[kExpansion]), 0, Console::kCartridges - 1);
-    settings_.expansionChannels = Clamp(Round(c[kExpansionChannels]), 1, 8);
+    const bool console = settings_.board == BoardKind::Console;
+    const int revisions = console ? static_cast<int>(Console::kRevisions) : static_cast<int>(Handheld::kRevisions);
+    settings_.revision = Clamp(Round(c[kRevision]), 0, revisions - 1);
+    settings_.expansion = console && settings_.revision == Console::kFamicom
+        ? Clamp(Round(c[kExpansion]), 0, Console::kCartridges - 1) : Console::kNone;
+    settings_.expansionChannels = settings_.expansion == Console::kN163 ? Clamp(Round(c[kExpansionChannels]), 1, 8) : 1;
     settings_.bias = Clamp(Round(c[kBias]), 0, 127);
     boards_ = Clamp(Round(c[kBoards]), 1, kMaxBoards);
     path_ = c[kPath] >= 0.5 ? Path::Line : Path::Pin;
+    const bool reset = forceReset || old.board != settings_.board || old.revision != settings_.revision
+        || old.expansion != settings_.expansion || old.expansionChannels != settings_.expansionChannels
+        || oldBoards != boards_ || wasDouble != double_;
     if (reset) {
         // The machines start at cycle 0 on this block boundary, so their
         // frames fall together.
@@ -102,10 +106,25 @@ void Engine::Apply(bool reset, bool revoice) {
         machines_[0].FramePeriod(periodNum_, periodDen_);
         frameHz_ = machines_[0].ClockHz() * static_cast<double>(periodDen_) / static_cast<double>(periodNum_);
         tickNum_ = periodNum_;
+    } else if (console && old.bias != settings_.bias) {
+        for (int b = 0; b < boards_; ++b) {
+            machines_[b].SetBias(settings_.bias);
+            if (double_)
+                twins_[b].SetBias(settings_.bias);
+        }
     }
     const Machine& m = machines_[0];
     const Part part = m.PartOf(part_);
-    trim_ = part.count > 0 ? LevelTrim(m, path_, part_, shape_ % m.Shapes(part.first, part.voice)) : 1.0;
+    const double targetTrim = part.count > 0 ? LevelTrim(m, path_, part_, shape_ % m.Shapes(part.first, part.voice)) : 1.0;
+    if (targetTrim != trim_) {
+        const int duration = kTrimRampFrames * oversampling_;
+        const double current = trimFramesLeft_ == 0 ? trim_ :
+            trimStart_ + trimStep_ * static_cast<float>(duration - trimFramesLeft_);
+        trimStart_ = static_cast<float>(current);
+        trimStep_ = static_cast<float>((targetTrim - current) / duration);
+        trimFramesLeft_ = duration;
+        trim_ = targetTrim;
+    }
     attack_ = c[kAttack] / 1000.0 * frameHz_;
     decay_ = c[kDecay] / 1000.0 * frameHz_;
     release_ = c[kRelease] / 1000.0 * frameHz_;
@@ -113,7 +132,7 @@ void Engine::Apply(bool reset, bool revoice) {
     vibratoDelay_ = Round(c[kVibratoDelay] / 1000.0 * frameHz_);
     glideFrames_ = Round(c[kGlide] / 1000.0 * frameHz_);
     gain_ = std::pow(10.0, c[kVolume] / 20.0);
-    if (revoice)
+    if (reset || oldMode != mode_ || oldPart != part_)
         Revoice(reset);
 }
 
@@ -132,7 +151,7 @@ void Engine::Revoice(bool reset) {
     switch (mode_) {
     case 0:
         for (int i = 0; i < heldCount_; ++i)
-            StartNote(held_[i].key, held_[i].velocity);
+            held_[i].waitingForPitch = StartNote(held_[i].key, held_[i].velocity) < 0;
         break;
     case 1: {
         const Key& top = held_[heldCount_ - 1];
@@ -140,9 +159,9 @@ void Engine::Revoice(bool reset) {
         break;
     }
     default: {
-        const int i = HeldIndex(ArpKey(0));
-        arpIndex_ = 0, arpCount_ = 0;
-        mono_ = StartNote(held_[i].key, held_[i].velocity);
+        const Key& first = NextArpKey(-1);
+        arpKey_ = first.key, arpCount_ = 0;
+        mono_ = StartNote(first.key, first.velocity);
         break;
     }
     }
@@ -199,16 +218,19 @@ int Engine::HeldIndex(int key) const noexcept {
     return -1;
 }
 
-// The `index`-th lowest held key.
-int Engine::ArpKey(int index) const noexcept {
+// Next ascending pitch, wrapping to the lowest. Live chord edits do not
+// move the cursor: it remembers the last played pitch, not its array index.
+const Engine::Key& Engine::NextArpKey(int after) const noexcept {
+    const Key* lowest = &held_[0];
+    const Key* next = nullptr;
     for (int i = 0; i < heldCount_; ++i) {
-        int below = 0;
-        for (int j = 0; j < heldCount_; ++j)
-            below += held_[j].key < held_[i].key;
-        if (below == index)
-            return held_[i].key;
+        const Key& k = held_[i];
+        if (k.key < lowest->key)
+            lowest = &k;
+        if (k.key > after && (!next || k.key < next->key))
+            next = &k;
     }
-    return held_[0].key;
+    return next ? *next : *lowest;
 }
 
 void Engine::NoteOn(int key, int velocity) {
@@ -220,7 +242,7 @@ void Engine::NoteOn(int key, int velocity) {
     if (HeldIndex(key) >= 0)
         Lift(key);
     held_[heldCount_++] = { key, Clamp(velocity, 1, 127), true };
-    Strike(key, Clamp(velocity, 1, 127));
+    Strike(held_[heldCount_ - 1]);
 }
 
 void Engine::NoteOff(int key) {
@@ -235,19 +257,40 @@ void Engine::NoteOff(int key) {
 }
 
 void Engine::SetSustain(bool down) {
+    if (pedal_ == down)
+        return;
     pedal_ = down;
     if (down)
         return;
-    for (int i = heldCount_ - 1; i >= 0; --i)
-        if (i < heldCount_ && !held_[i].down)
-            Lift(held_[i].key);
+    // The pedal releases its keys together. Retargeting after each removal
+    // would play intervening keys and put a Mono release on the wrong pitch.
+    int kept = 0;
+    for (int i = 0; i < heldCount_; ++i) {
+        if (held_[i].down)
+            held_[kept++] = held_[i];
+        else if (mode_ == 0)
+            ReleaseKey(held_[i].key);
+    }
+    if (kept != heldCount_) {
+        heldCount_ = kept;
+        if (mode_ != 0)
+            FollowHeld();
+    }
 }
 
 // NaN lands at the bottom of the range.
-void Engine::SetBend(double amount) { bend_ = amount > -1.0 ? (amount < 1.0 ? amount : 1.0) : -1.0; }
+void Engine::SetBend(double amount) {
+    const double next = amount > -1.0 ? (amount < 1.0 ? amount : 1.0) : -1.0;
+    retryPitch_ |= next != bend_;
+    bend_ = next;
+}
 void Engine::SetWheel(double amount) { wheel_ = amount > 0.0 ? (amount < 1.0 ? amount : 1.0) : 0.0; }
 // NaN plays at pitch rather than a semitone flat.
-void Engine::SetTune(double cents) { tune_ = std::isfinite(cents) ? std::clamp(cents, -100.0, 100.0) : 0.0; }
+void Engine::SetTune(double cents) {
+    const double next = std::isfinite(cents) ? std::clamp(cents, -100.0, 100.0) : 0.0;
+    retryPitch_ |= next != tune_;
+    tune_ = next;
+}
 
 void Engine::ReleaseAll() {
     pedal_ = false;
@@ -267,12 +310,11 @@ void Engine::Panic() {
 void Engine::Reset() {
     pedal_ = false;
     heldCount_ = 0;
-    for (Decimator& d : decimators_)
-        d.Reset();
+    decimator_.Reset();
     stage_.Reset();
     // The machines reset, and the slots cleared with them.
-    Apply(true, true);
-    trimHeard_ = trim_;
+    Apply(true);
+    trimFramesLeft_ = 0;
 }
 
 int Engine::Sounding() const noexcept {
@@ -283,10 +325,11 @@ int Engine::Sounding() const noexcept {
 }
 
 // A key that was just added to held_.
-void Engine::Strike(int key, int velocity) {
+void Engine::Strike(Key& note) {
+    const int key = note.key, velocity = note.velocity;
     switch (mode_) {
     case 0:
-        StartNote(key, velocity);
+        note.waitingForPitch = StartNote(key, velocity) < 0;
         break;
     case 1:
         if (mono_ >= 0 && slots_[mono_].gate) {
@@ -302,13 +345,29 @@ void Engine::Strike(int key, int velocity) {
         // runs joins it.
         if (mono_ >= 0 && slots_[mono_].gate)
             break;
-        arpIndex_ = 0, arpCount_ = 0;
-        while (ArpKey(arpIndex_) != key)
-            ++arpIndex_;
+        arpKey_ = key, arpCount_ = 0;
         if (mono_ >= 0)
             End(mono_);
         mono_ = StartNote(key, velocity);
         break;
+    }
+}
+
+// A note that was unplayable at onset has no hardware slot yet. Retry it
+// on a pitch change, just as active slots get their new periods on this frame.
+// A stolen Poly note already had its onset and must not be resurrected.
+void Engine::RetryHeldPitches() {
+    retryPitch_ = false;
+    if (mode_ == 0) {
+        for (int i = 0; i < heldCount_; ++i) {
+            Key& k = held_[i];
+            if (k.waitingForPitch)
+                k.waitingForPitch = StartNote(k.key, k.velocity) < 0;
+        }
+    } else if (mono_ < 0 && heldCount_ > 0) {
+        const int index = mode_ == 1 ? heldCount_ - 1 : HeldIndex(arpKey_);
+        if (index >= 0)
+            mono_ = StartNote(held_[index].key, held_[index].velocity);
     }
 }
 
@@ -320,31 +379,30 @@ void Engine::Lift(int key) {
     for (int j = i + 1; j < heldCount_; ++j)
         held_[j - 1] = held_[j];
     --heldCount_;
-    switch (mode_) {
-    case 0:
-        for (int s = 0; s < kSlots; ++s)
-            if (slots_[s].busy && slots_[s].gate && slots_[s].key == key)
-                ReleaseSlot(s);
-        break;
-    case 1:
-        if (mono_ < 0 || !slots_[mono_].gate)
-            break;
-        if (heldCount_ == 0) {
+    if (mode_ == 0)
+        ReleaseKey(key);
+    else
+        FollowHeld();
+}
+
+void Engine::ReleaseKey(int key) {
+    for (int s = 0; s < boards_ * Machine::kMaxChannels; ++s)
+        if (slots_[s].busy && slots_[s].gate && slots_[s].key == key)
+            ReleaseSlot(s);
+}
+
+// Mono uses the newest remaining key. Arp keeps its current step until
+// the next frame due; both start their release on the last sounding pitch.
+void Engine::FollowHeld() {
+    if (heldCount_ == 0) {
+        if (mono_ >= 0 && slots_[mono_].gate)
             ReleaseSlot(mono_);
-        } else {
-            const Key& top = held_[heldCount_ - 1];
-            if (slots_[mono_].key != top.key)
-                Retarget(top.key, top.velocity, true);
-        }
-        break;
-    default:
-        if (heldCount_ == 0) {
-            if (mono_ >= 0 && slots_[mono_].gate)
-                ReleaseSlot(mono_);
-        } else {
-            arpIndex_ %= heldCount_;
-        }
-        break;
+    } else if (mode_ == 1) {
+        const Key& top = held_[heldCount_ - 1];
+        if (mono_ < 0)
+            mono_ = StartNote(top.key, top.velocity);
+        else if (slots_[mono_].key != top.key)
+            Retarget(top.key, top.velocity, true);
     }
 }
 
@@ -360,7 +418,8 @@ int Engine::StartNote(int key, int velocity) {
     probe.key = key;
     const double hz = Pitch(probe, -Spread());
     std::int64_t period = 0;
-    if (!m.PeriodFor(part.first, part.voice, hz, shape_ % m.Shapes(part.first, part.voice), period)) {
+    const bool fallback = !m.PeriodFor(part.first, part.voice, hz, shape_ % m.Shapes(part.first, part.voice), period);
+    if (fallback) {
         part = m.FallbackOf(part);
         if (part.count == 0
             || !m.PeriodFor(part.first, part.voice, hz, shape_ % m.Shapes(part.first, part.voice), period))
@@ -387,6 +446,7 @@ int Engine::StartNote(int key, int velocity) {
     n.busy = true, n.gate = true;
     n.key = key, n.velocity = velocity;
     n.voice = part.voice;
+    n.fallback = fallback;
     n.age = ++age_;
     // A note at sustain 0 keeps its channel while the key holds it, silent,
     // so that raising the sustain brings it back.
@@ -405,7 +465,7 @@ void Engine::Retarget(int key, int velocity, bool glide) {
     n.key = key, n.velocity = velocity;
     n.glide = offset;
     n.glideLeft = offset != 0.0 ? glideFrames_ : 0;
-    WriteMono();
+    Write(mono_);
 }
 
 // The envelope from the start, as a new note's: the arpeggio's steps.
@@ -541,42 +601,44 @@ void Engine::Send(int slot, const ChannelSettings& s, bool start) {
     n.twin = t;
 }
 
+// Preserve the note's envelope, glide and vibrato across a channel handoff.
+// Prefer the same machine, then a free compatible channel on another one.
+// A bend must not steal another held note: if all the fallbacks are busy,
+// the note waits silently at its present slot until the pitch or room changes.
 void Engine::Write(int slot) {
+    const Slot& n = slots_[slot];
+    const int board = BoardOf(slot);
+    const Machine& m = machines_[board];
     ChannelSettings s;
-    Compose(slot, s, -Spread());
-    Send(slot, s, false);
-}
-
-// Mono and Arp own one voice. When its current pitch crosses a register
-// limit, hand the same envelope, glide and vibrato to a channel of the same
-// physical machine. Return to the selected part as soon as it is in range.
-void Engine::WriteMono() {
-    const Machine& m = machines_[BoardOf(mono_)];
-    const Part primary = m.PartOf(part_);
-    const int ch = Channel(mono_);
-    const bool onPrimary = ch >= primary.first && ch < primary.first + primary.count;
-    ChannelSettings s;
-    const bool fits = Compose(mono_, s, -Spread());
-    if (!onPrimary || !fits) {
-        const Part destination = onPrimary ? m.FallbackOf(primary) : primary;
+    const bool fits = Compose(slot, s, -Spread());
+    if (n.fallback || !fits) {
+        const Part primary = m.PartOf(part_);
+        const Part dest = n.fallback ? primary : m.FallbackOf(primary);
         std::int64_t period;
-        if (destination.count > 0 && m.PeriodFor(destination.first, destination.voice, Pitch(slots_[mono_], -Spread()),
-                                                  shape_ % m.Shapes(destination.first, destination.voice), period)) {
-            const int next = BoardOf(mono_) * Machine::kMaxChannels + destination.first;
-            slots_[next] = slots_[mono_];
-            slots_[next].voice = destination.voice;
-            End(mono_);
-            mono_ = next;
-            Compose(next, s, -Spread());
-            Send(next, s, true);
-            return;
+        if (dest.count > 0 && m.PeriodFor(dest.first, dest.voice, Pitch(n, -Spread()),
+                                          shape_ % m.Shapes(dest.first, dest.voice), period)) {
+            for (int i = 0; i < boards_; ++i) {
+                const int base = ((board + i) % boards_) * Machine::kMaxChannels;
+                for (int ch = dest.first; ch < dest.first + dest.count; ++ch) {
+                    const int next = base + ch;
+                    if (slots_[next].busy)
+                        continue;
+                    slots_[next] = n;
+                    slots_[next].voice = dest.voice;
+                    slots_[next].fallback = !n.fallback;
+                    if (slot == mono_)
+                        mono_ = next;
+                    End(slot);
+                    Compose(next, s, -Spread());
+                    Send(next, s, true);
+                    return;
+                }
+            }
         }
-        // Beyond both parts' ranges, keep following the key in silence so
-        // its glide, bend or a later legato key can bring the voice back.
         if (!fits)
             s.volume = 0;
     }
-    Send(mono_, s, false);
+    Send(slot, s, false);
 }
 
 // The machines' frame: the arpeggio, whose every step starts the envelope
@@ -585,17 +647,18 @@ void Engine::Tick() {
     int restarted = -1;
     if (mode_ == 2 && heldCount_ > 0 && ++arpCount_ >= arpRate_) {
         arpCount_ = 0;
-        arpIndex_ = (arpIndex_ + 1) % heldCount_;
-        const int key = ArpKey(arpIndex_);
-        const int velocity = held_[HeldIndex(key)].velocity;
+        const Key& next = NextArpKey(arpKey_);
+        arpKey_ = next.key;
         if (mono_ >= 0 && slots_[mono_].gate) {
             Restart(slots_[mono_]);
-            Retarget(key, velocity, false);
+            Retarget(next.key, next.velocity, false);
         } else {
-            mono_ = StartNote(key, velocity);
+            mono_ = StartNote(next.key, next.velocity);
         }
         restarted = mono_;
     }
+    int writes[kSlots];
+    int count = 0;
     for (int s = 0; s < boards_ * Machine::kMaxChannels; ++s) {
         Slot& n = slots_[s];
         if (!n.busy)
@@ -616,13 +679,14 @@ void Engine::Tick() {
             End(s);
             continue;
         }
-        if (s != mono_)
-            Write(s);
+        writes[count++] = s;
     }
-    // A channel handoff can change mono_'s slot. Write it after stepping
-    // the envelopes so the moved note never advances twice on one frame.
-    if (mono_ >= 0)
-        WriteMono();
+    // A write can move a note to a free slot. Finish every envelope first
+    // so no note advances twice (or loses a frame) when it changes channels.
+    for (int i = 0; i < count; ++i)
+        Write(writes[i]);
+    if (retryPitch_)
+        RetryHeldPitches();
 }
 
 void Engine::Process(float* left, float* right, int frames) {
@@ -662,28 +726,25 @@ void Engine::Process(float* left, float* right, int frames) {
             if (double_)
                 twins_[b].Render(m, path_, bus_[2], bus_[3]);
         }
-        // The trim moves across the block, so a change of part or shape
-        // does not click.
-        const float from = static_cast<float>(trimHeard_);
-        const float step = static_cast<float>((trim_ - trimHeard_) / m);
-        trimHeard_ = trim_;
-        if (double_) {
-            // Each set's own stereo folds to its side, at the level one
-            // side of a single set has.
-            for (int i = 0; i < m; ++i) {
-                const float g = 0.5f * (from + step * static_cast<float>(i + 1));
-                bus_[0][i] = g * (bus_[0][i] + bus_[1][i]);
-                bus_[1][i] = g * (bus_[2][i] + bus_[3][i]);
-            }
-        } else {
-            for (int i = 0; i < m; ++i) {
-                const float g = from + step * static_cast<float>(i + 1);
+        const auto mix = [&](int i, float g) {
+            if (double_) {
+                // Each stereo set folds to its side at the single-set level.
+                const float half = 0.5f * g;
+                bus_[0][i] = half * (bus_[0][i] + bus_[1][i]);
+                bus_[1][i] = half * (bus_[2][i] + bus_[3][i]);
+            } else {
                 bus_[0][i] *= g;
                 bus_[1][i] *= g;
             }
-        }
-        decimators_[0].Process(bus_[0], n);
-        decimators_[1].Process(bus_[1], n);
+        };
+        const int ramped = m < trimFramesLeft_ ? m : trimFramesLeft_;
+        const int elapsed = kTrimRampFrames * oversampling_ - trimFramesLeft_;
+        for (int i = 0; i < ramped; ++i)
+            mix(i, trimStart_ + trimStep_ * static_cast<float>(elapsed + i + 1));
+        trimFramesLeft_ -= ramped;
+        for (int i = ramped; i < m; ++i)
+            mix(i, static_cast<float>(trim_));
+        decimator_.Process(bus_[0], bus_[1], n);
         const float gain = static_cast<float>(gain_);
         for (int i = 0; i < n; ++i) {
             std::array<float, 2> frame { bus_[0][i] * gain, bus_[1][i] * gain };

@@ -55,6 +55,9 @@ public:
 
     void Prepare(int sampleRate) {
         rate_ = sampleRate;
+        capacitorDesign_[kOriginal].Design(0.999958, sampleRate);
+        capacitorDesign_[kColor].Design(kColorCapacitor, sampleRate);
+        colorHighPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::HighPass, 176.0, sampleRate);
         DesignPinBlocker(pinBlocker_[0], sampleRate);
         DesignPinBlocker(pinBlocker_[1], sampleRate);
         // Reported: SameBoy (MIT, Core/apu.c) models pre-GBA physical DAC
@@ -72,12 +75,10 @@ public:
         dacOff_[1].Clear();
         bus_.Clear();
         for (int s = 0; s < 2; ++s) {
-            capacitor_[s].Design(revision == kColor ? kColorCapacitor : 0.999958, rate_);
-            capacitor_[s].Reset();
-            if (revision == kColor)
-                amplifier_[s].Design(FirstOrder::Kind::HighPass, 176.0, rate_);
-            else
-                amplifier_[s].Design(FirstOrder::Kind::Pass, 0.0, rate_);
+            const bool color = revision == kColor;
+            capacitor_[s] = capacitorDesign_[color ? kColor : kOriginal];
+            amplifier_[s].SetCoefficients(color ? FirstOrder::Kind::HighPass : FirstOrder::Kind::Pass,
+                                          color ? colorHighPass_ : FirstOrder::Coefficients {});
             amplifier_[s].Reset();
             pinBlocker_[s].Reset();
             dacResidual_[s] = 0.0;
@@ -110,8 +111,16 @@ public:
     // Drains initial driver boot writes, settles the output stages on any
     // resting bias, and aligns the sample block origin to the current cycle.
     void FinishBoot() noexcept {
-        if (!bus_.Empty())
-            RunTo(bus_.LastCycle() + 1);
+        if (!bus_.Empty()) {
+            const auto end = bus_.LastCycle() + 1;
+            // Keep even a long initialization sequence inside the sample buffer.
+            // The host starts listening only after FinishBoot settles the filters.
+            while (end > tb_.CycleAt(StepBuffer::kMaxFrames)) {
+                float discard[StepBuffer::kMaxFrames] {};
+                Render(StepBuffer::kMaxFrames, Path::Pin, discard, discard);
+            }
+            RunTo(end);
+        }
         const double left = mix_.Land(0);
         const double right = mix_.Land(1);
         pinBlocker_[0].Settle(left);
@@ -227,7 +236,8 @@ private:
     // A capacitor's factor per clock for a corner f is 1 - 2 pi f / 4194304.
     static constexpr double kColorCapacitor = 1.0 - 2.0 * 3.141592653589793 * 47.0 / 4194304.0;
 
-    ChargeHighPass capacitor_[2];
+    ChargeHighPass capacitorDesign_[kRevisions], capacitor_[2];
+    FirstOrder::Coefficients colorHighPass_;
     FirstOrder amplifier_[2];   // the Color's feedback high-pass; the original's passes
     FirstOrder pinBlocker_[2];
     double dacFadeFactor_ = 0.0;

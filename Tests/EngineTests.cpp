@@ -196,6 +196,35 @@ void TestPartitionAndDeterminism() {
     }
 }
 
+// Shape and tap changes can both select a new level trim. The second change
+// interrupts the first ramp, so this also checks its starting gain.
+void TestTrimAutomationPartition() {
+    for (int factor : { 1, 2, 4, 8 }) {
+        const auto render = [factor](int block) {
+            Controls c = Plain(0, 0, 2);
+            auto e = Fresh(c, 48000.0, factor);
+            e->NoteOn(60, 100);
+            Play(*e, {}, 4096, block);
+            c[kShape] = 0;
+            e->SetControls(c);
+            Audio first = Play(*e, {}, 19, block);
+            c[kPath] = 1;
+            e->SetControls(c);
+            Audio rest = Play(*e, {}, 512, block);
+            first.left.insert(first.left.end(), rest.left.begin(), rest.left.end());
+            first.right.insert(first.right.end(), rest.right.begin(), rest.right.end());
+            return first;
+        };
+        const Audio reference = render(64);
+        for (int block : { 1, 16, 256 }) {
+            const Audio actual = render(block);
+            Check(actual.left == reference.left && actual.right == reference.right,
+                  "automated trim changes with block " + std::to_string(block) +
+                  " at oversampling " + std::to_string(factor));
+        }
+    }
+}
+
 void TestPresets() {
     for (std::size_t p = 0; p < kPresets.size(); ++p) {
         const Controls c = kPresets[p].ToControls();
@@ -453,6 +482,152 @@ void TestLegatoRange() {
 
 // Selecting Arp over an existing chord starts on its lowest key. If that
 // pitch is below even the triangle's register floor, later steps still play.
+void TestPolyRange() {
+    for (int board : { 0, 1 }) {
+        Controls c = Plain(board);
+        c[kBoards] = 2;
+        c[kBendRange] = 12;
+        const auto e = Fresh(c);
+        Play(*e, { On(0, 43) }, 12000);
+        e->SetBend(-1.0);
+        const Audio down = Play(*e, {}, 48000);
+        const double low = Measure(down.left, 49.0, 48000, 12000, 48000);
+        Check(std::fabs(Cents(low, 49.0)) < 5.0,
+              "Poly: the held G2 bent down to " + std::to_string(low) + " Hz on board " + std::to_string(board));
+        e->SetBend(0.0);
+        const Audio up = Play(*e, {}, 24000);
+        Check(std::fabs(Cents(Measure(up.left, 98.0, 48000, 6000, 24000), 98.0)) < 5.0,
+              "Poly: the G2 did not return from its fallback");
+
+        // Both original pulses fit on the first machine, but each machine
+        // has just one fallback channel. Both bent voices still fit the rig.
+        e->NoteOn(44, 100);
+        e->SetBend(-1.0);
+        Play(*e, {}, 16000);
+        for (int b = 0; b < 2; ++b) {
+            const Machine& m = e->MachineAt(b);
+            int first = -1;
+            bool varied = false;
+            float l[13], r[13];
+            for (int i = 0; i < 160; ++i) {
+                e->Process(l, r, 13);
+                const int level = board == 0 ? m.HandheldBoard().Chip().Out(2) : m.ConsoleBoard().Apu().Out(2);
+                if (i == 0)
+                    first = level;
+                varied |= level != first;
+            }
+            Check(varied, "Poly: bent chord missing fallback on machine " + std::to_string(b));
+        }
+        e->ReleaseAll();
+        Play(*e, {}, 48000);
+        Check(e->Sounding() == 0, "Poly: a migrated chord did not release");
+    }
+
+    // One machine cannot play both pulses on its single fallback. When
+    // the migrated G is released, the other bent key must claim that slot.
+    Controls one = Plain(0);
+    one[kBoards] = 1;
+    one[kBendRange] = 12;
+    one[kRelease] = 0;
+    const auto crowded = Fresh(one);
+    Play(*crowded, { On(0, 43), On(500, 44) }, 12000);
+    crowded->SetBend(-1.0);
+    Play(*crowded, {}, 12000);
+    const Audio remaining = Play(*crowded, { Off(0, 43) }, 48000);
+    const double flat = Measure(remaining.left, 51.91, 48000, 12000, 48000);
+    Check(std::fabs(Cents(flat, 51.91)) < 5.0 && crowded->Sounding() == 1,
+          "Poly: waiting bent key did not take the newly freed fallback");
+    const Audio empty = Play(*crowded, { Off(0, 44) }, 24000);
+    Check(crowded->Sounding() == 0 && Settles(empty.left, 12000), "Poly: fallback remained gated after its own note-off");
+
+    Controls c = Plain(1);
+    c[kBendRange] = 12;
+    const auto e = Fresh(c);
+    Play(*e, { On(0, 31) }, 12000); // G1 already needs the triangle fallback.
+    e->SetBend(-1);
+    const Audio outside = Play(*e, {}, 48000);
+    Check(Settles(outside.left, 20000), "Poly: an unplayable bend holds the triangle's previous pitch");
+    e->SetBend(0);
+    const Audio back = Play(*e, {}, 48000);
+    Check(std::fabs(Cents(Measure(back.left, 49.0, 48000, 12000, 48000), 49.0)) < 5.0,
+          "Poly: triangle did not recover after the bend came back in range");
+}
+
+// A0 fits the Console triangle, but a downward bend/tuning can put it
+// below that register before note-on. Keeping the key down must let it
+// sound when a wheel or automation brings it back into range.
+void TestHeldPitchRecovery() {
+    for (int mode : { 0, 1, 2 }) {
+        for (int move : { 0, 1, 2 }) {
+            Controls c = Plain(1);
+            c[kDouble] = 1;
+            c[kDetune] = 4;
+            c[kMode] = mode;
+            c[kBendRange] = 12;
+            if (move == 2)
+                c[kTranspose] = -12;
+            const auto e = Fresh(c);
+            if (move == 0)
+                e->SetBend(-1);
+            if (move == 1)
+                e->SetTune(-100);
+            const Audio outside = Play(*e, { On(0, 21) }, 9600);
+            Check(Peak(outside.left) < 1.0e-6 && Peak(outside.right) < 1.0e-6, "unplayable A0 sounded at note-on");
+            if (move == 0)
+                e->SetBend(0);
+            if (move == 1)
+                e->SetTune(0);
+            if (move == 2) {
+                c[kTranspose] = 0;
+                e->SetControls(c);
+            }
+            const Audio inside = Play(*e, {}, 48000);
+            for (const auto* side : { &inside.left, &inside.right }) {
+                const double hz = Measure(*side, 27.5, 48000, 12000, 48000);
+                Check(std::fabs(Cents(hz, 27.5)) < 8.0,
+                      "held A0: mode " + std::to_string(mode) + ", pitch source " + std::to_string(move) + ", Hz " + std::to_string(hz));
+            }
+        }
+    }
+    Controls wave = Plain(0, 1);
+    wave[kBoards] = 1;
+    wave[kRelease] = 0;
+    const auto stolen = Fresh(wave);
+    Play(*stolen, { On(0, 60), On(100, 67), Off(1000, 67) }, 24000);
+    stolen->SetTune(50);
+    const Audio silent = Play(*stolen, {}, 16000);
+    Check(stolen->Sounding() == 0 && Settles(silent.left, 0), "a pitch change resurrected a stolen Poly note");
+
+}
+
+void TestInactiveMachineControls() {
+    for (int setup : { 0, 1, 2 }) {
+        Controls original = Plain(setup == 0 ? 0 : 1);
+        original[kRevision] = setup == 1 ? Console::kFrontLoader : 1;
+        original[kExpansion] = setup == 2 ? Console::kFds : Console::kNone;
+        original[kAttack] = 350;
+        const auto reference = Fresh(original), changed = Fresh(original);
+        Play(*reference, { On(0, 69) }, 16000);
+        Play(*changed, { On(0, 69) }, 16000);
+        Controls next = original;
+        next[kExpansionChannels] = 8;
+        if (setup != 2)
+            next[kExpansion] = Console::kN163; // Neither machine has an active cartridge slot.
+        if (setup == 0)
+            next[kRevision] = 2; // Both settings select the same physical Handheld revision.
+        changed->SetControls(next);
+        const Audio a = Play(*reference, {}, 16000);
+        const Audio b = Play(*changed, {}, 16000);
+        Check(a.left == b.left && a.right == b.right, "inactive machine settings restarted setup " + std::to_string(setup));
+
+        next[kBoard] = 1;
+        next[kRevision] = Console::kFamicom;
+        next[kExpansion] = Console::kN163;
+        changed->SetControls(next);
+        Check(changed->MachineAt(0).PartOf(3).count == 8, "deferred cartridge channel count lost");
+    }
+}
+
 void TestArpRange() {
     Controls c = Plain(1);
     c[kArpRate] = 6;
@@ -464,6 +639,20 @@ void TestArpRange() {
     const Audio a = Play(*e, {}, 48000);
     Check(Rms(a.left, 6000, 9000) > 0.02 && Rms(a.left, 25500, 27000) > 0.02,
           "arp: a key outside the console's range silences the higher steps");
+}
+
+// Editing the chord below the sounding step leaves the next higher pitch next.
+void TestArpChordEdits() {
+    Controls c = Plain(0);
+    c[kMode] = 2;
+    c[kArpRate] = 6;
+    for (const Event& edit : { On(7000, 55), Off(7000, 60), Off(7000, 64) }) {
+        const auto e = Fresh(c);
+        const Audio a = Play(*e, { On(0, 60), On(0, 64), On(0, 67), edit }, 14400);
+        const double hz = Measure(a.left, 392.0, 48000, 10800, 14200);
+        Check(std::fabs(Cents(hz, 392.0)) < 6.0,
+              "Arp: changed chord after E4 landed at " + std::to_string(hz) + " Hz instead of G4");
+    }
 }
 
 void TestModes() {
@@ -527,6 +716,16 @@ void TestPedalAndPanic() {
         const auto e = Fresh(c);
         Play(*e, { Cc(0, 64, 127), On(10, 69), Off(20, 69), On(30, 69), Off(40, 69), On(50, 69) }, 4800);
         Check(e->Sounding() == 1, "a re-struck key under the pedal is " + std::to_string(e->Sounding()) + " notes");
+    }
+    {
+        Controls mono = Plain(0);
+        mono[kMode] = 1;
+        mono[kRelease] = 1500;
+        const auto e = Fresh(mono);
+        Play(*e, { Cc(0, 64, 127), On(100, 57), Off(1000, 57), On(2000, 69), Off(3000, 69) }, 12000);
+        const Audio tail = Play(*e, { Cc(0, 64, 0) }, 24000);
+        const double hz = Measure(tail.left, 311.0, 48000, 4800, 24000);
+        Check(std::fabs(Cents(hz, 440.0)) < 5.0, "Mono pedal-up bent the A4 release tail to " + std::to_string(hz));
     }
     for (int cc : { 120, 123 }) {
         Controls slow = Plain(0);
@@ -906,6 +1105,7 @@ void TestAuthenticityEnhancements() {
 
 int main() {
     TestPartitionAndDeterminism();
+    TestTrimAutomationPartition();
     TestPresets();
     TestReferenceLevel();
     TestRates();
@@ -915,7 +1115,11 @@ int main() {
     TestVoices();
     TestModes();
     TestLegatoRange();
+    TestPolyRange();
+    TestInactiveMachineControls();
+    TestHeldPitchRecovery();
     TestArpRange();
+    TestArpChordEdits();
     TestPedalAndPanic();
     TestReset();
     TestEnvelope();

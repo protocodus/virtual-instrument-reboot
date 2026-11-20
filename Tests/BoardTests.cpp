@@ -7,9 +7,11 @@
 #include "DSP/Render/Decimator.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -497,8 +499,12 @@ void TestKernels() {
     };
     for (int p = 0; p <= blep::kPhases; ++p) {
         std::int64_t sum = 0;
-        for (int j = 0; j < blep::kTaps; ++j)
-            sum += blep::kTable[p][j];
+        for (int j = 0; j < blep::kTaps; ++j) {
+            const std::int32_t tap = blep::kTable[p][j];
+            constexpr int maxTap = 1 << blep::kUnitBits;
+            Check(tap >= -maxTap && tap <= maxTap, "step kernel exceeds its signed interpolation range");
+            sum += tap;
+        }
         Check(sum == (std::int64_t { 1 } << blep::kUnitBits), "step kernel phase " + std::to_string(p) + " does not sum to 1");
     }
     // Flat to 0.4 of the rate, at least 99 dB down from 0.6 to 4 times it
@@ -550,6 +556,41 @@ void TestKernels() {
             Check(std::fabs(db) < 0.01, "the decimator moves a 1 kHz tone by " + std::to_string(db) + " dB");
         else
             Check(db < -95.0, "the decimator folds a 30 kHz tone back at " + std::to_string(db) + " dB");
+    }
+}
+
+// Compare the shared FIR history with two independent chains. A short
+// identical passage must retain the preceding stereo tail; a long one may
+// share the chain, but splitting again must start from that shared history.
+void TestStereoDecimatorHistory() {
+    for (int factor : { 1, 2, 4, 8 }) {
+        StereoDecimator stereo;
+        Decimator left, right;
+        stereo.Prepare(factor);
+        left.Prepare(factor);
+        right.Prepare(factor);
+        int sample = 0;
+        for (int block = 0; block < 150; ++block) {
+            const int frames = 1 + (block * 7) % 29;
+            const bool different = block == 7 || block == 9 || block == 56 || block > 102;
+            if (block == 104) {
+                stereo.Reset();
+                left.Reset();
+                right.Reset();
+            }
+            std::array<float, 256> l {}, r {};
+            for (int i = 0; i < frames * factor; ++i, ++sample) {
+                l[i] = static_cast<float>((sample * 13) % 197 - 98) / 128.0f;
+                r[i] = different ? l[i] * -0.75f : l[i];
+            }
+            std::array<float, 256> a = l, b = r;
+            stereo.Process(l.data(), r.data(), frames);
+            left.Process(a.data(), frames);
+            right.Process(b.data(), frames);
+            const auto bytes = sizeof(float) * static_cast<std::size_t>(frames);
+            Check(std::memcmp(l.data(), a.data(), bytes) == 0 && std::memcmp(r.data(), b.data(), bytes) == 0,
+                  "shared decimator loses stereo history at oversampling " + std::to_string(factor));
+        }
     }
 }
 
@@ -699,8 +740,41 @@ void TestBlackboxBus() {
     }
 }
 
+// A disk driver can write $4089 several times in one output sample. Its
+// analog filter must see the same settings across any legal block partition.
+void TestDiskMasterWrites() {
+    for (const int rate : { 48000, 384000 }) {
+        const auto render = [rate](int block) {
+            Console board;
+            board.Prepare(rate);
+            board.Reset(Console::kFamicom, Console::kFds);
+            board.Write(0x4023, 0x83);
+            board.Write(0x4080, 0xA0);
+            board.Write(0x4089, 0x80);
+            for (int i = 0; i < 64; ++i)
+                board.Write(static_cast<std::uint16_t>(0x4040 + i), static_cast<std::uint8_t>(i));
+            board.Write(0x4089, 0);
+            board.Write(0x4082, 0x27);
+            board.Write(0x4083, 0x09);
+            board.FinishBoot();
+            for (int i = 0; i < 128; ++i)
+                board.Write(0x4089, static_cast<std::uint8_t>(i % 4));
+            std::array<float, 512> left {}, right {};
+            for (int at = 0; at < 512; at += block)
+                board.Render(std::min(block, 512 - at), Path::Line, left.data() + at, right.data() + at);
+            return left;
+        };
+        const auto reference = render(1);
+        Check(*std::max_element(reference.begin(), reference.end()) > .01f,
+              "disk master volume sequence must produce an audible waveform");
+        for (const int block : { 3, 64, 256 })
+            Check(render(block) == reference, "disk RC master writes changed with render block size");
+    }
+}
+
 int main() {
     TestKernels();
+    TestStereoDecimatorHistory();
     auto machine = std::make_unique<Machine>();
     TestPitch(*machine);
     TestRanges(*machine);
@@ -710,6 +784,7 @@ int main() {
     TestRestAfterReset(*machine);
     TestMonitorPathSwitch(*machine);
     TestBlackboxBus();
+    TestDiskMasterWrites();
     if (failures == 0)
         std::printf("Reboot.Boards: all checks passed\n");
     return failures == 0 ? 0 : 1;

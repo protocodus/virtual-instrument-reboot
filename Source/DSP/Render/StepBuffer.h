@@ -32,6 +32,7 @@ public:
     void Clear() noexcept {
         std::memset(diff_, 0, sizeof diff_);
         sum_ = 0;
+        pending_ = 0;
     }
 
     // A change of `delta` (in 2^-kLevelBits) at `position` (in 2^-kSubBits
@@ -40,28 +41,37 @@ public:
         if (delta == 0)
             return;
         const int sample = static_cast<int>(position >> kSubBits);
+        if (sample + blep::kTaps > pending_)
+            pending_ = sample + blep::kTaps;
         const int sub = static_cast<int>(position & (kSamples - 1));
         const int phase = sub >> kFracBits;
         const int frac = sub & ((1 << kFracBits) - 1);
         const std::int32_t* a = blep::kTable[phase];
         const std::int32_t* b = blep::kTable[phase + 1];
-        const std::int64_t wa = static_cast<std::int64_t>(delta) * ((1 << kFracBits) - frac);
-        const std::int64_t wb = static_cast<std::int64_t>(delta) * frac;
+        // Kernel taps are signed Q20 and the two weights sum to 64, so the
+        // interpolated coefficient fits in int32. Widen only the final
+        // level multiplication; the integer convolution stays exact.
+        const int weightA = (1 << kFracBits) - frac;
         std::int64_t* out = diff_ + sample;
-        for (int j = 0; j < blep::kTaps; ++j)
-            out[j] += wa * a[j] + wb * b[j];
+        for (int j = 0; j < blep::kTaps; ++j) {
+            const std::int32_t coefficient = weightA * a[j] + frac * b[j];
+            out[j] += static_cast<std::int64_t>(delta) * coefficient;
+        }
     }
 
     // Integrates `frames` samples into out (added to it, times gain) and
     // moves the kernel tails to the front.
     void Read(float* out, int frames, double gain) noexcept {
         const double scale = gain / static_cast<double>(std::int64_t { 1 } << (kLevelBits + blep::kUnitBits + kFracBits));
-        for (int i = 0; i < frames; ++i) {
+        const int count = frames < pending_ ? frames : pending_;
+        for (int i = 0; i < count; ++i) {
             sum_ += diff_[i];
             out[i] += static_cast<float>(static_cast<double>(sum_) * scale);
         }
-        std::memmove(diff_, diff_ + frames, sizeof(std::int64_t) * blep::kTaps);
-        std::memset(diff_ + blep::kTaps, 0, sizeof(std::int64_t) * static_cast<std::size_t>(frames));
+        const float settled = static_cast<float>(static_cast<double>(sum_) * scale);
+        for (int i = count; i < frames; ++i)
+            out[i] += settled;
+        Advance(count);
     }
 
     // Writes each sample's band-limited step increment (without integrating into
@@ -69,10 +79,13 @@ public:
     // without unbounded accumulator growth.
     void ReadDelta(float* out, int frames, double gain = 1.0) noexcept {
         const double scale = gain / static_cast<double>(std::int64_t { 1 } << (kLevelBits + blep::kUnitBits + kFracBits));
-        for (int i = 0; i < frames; ++i)
+        const int count = frames < pending_ ? frames : pending_;
+        for (int i = 0; i < count; ++i)
             out[i] = static_cast<float>(static_cast<double>(diff_[i]) * scale);
-        std::memmove(diff_, diff_ + frames, sizeof(std::int64_t) * blep::kTaps);
-        std::memset(diff_ + blep::kTaps, 0, sizeof(std::int64_t) * static_cast<std::size_t>(frames));
+        const float zero = static_cast<float>(0.0 * scale);
+        for (int i = count; i < frames; ++i)
+            out[i] = zero;
+        Advance(count);
     }
 
     // Lands every step in flight at once, and returns the level it leaves.
@@ -81,6 +94,7 @@ public:
             sum_ += d;
             d = 0;
         }
+        pending_ = 0;
         return static_cast<double>(sum_) / static_cast<double>(std::int64_t { 1 } << (kLevelBits + blep::kUnitBits + kFracBits));
     }
 
@@ -93,6 +107,18 @@ public:
     }
 
 private:
+    // Cells from pending_ onward are known zeros. Only the part touched by
+    // recent BLEP edges needs to be integrated, shifted or cleared.
+    void Advance(int count) noexcept {
+        if (count == 0)
+            return;
+        pending_ -= count;
+        if (pending_ > 0)
+            std::memmove(diff_, diff_ + count, sizeof(std::int64_t) * static_cast<std::size_t>(pending_));
+        std::memset(diff_ + pending_, 0, sizeof(std::int64_t) * static_cast<std::size_t>(count));
+    }
+
+    int pending_ = 0;
     std::int64_t diff_[kMaxFrames + blep::kTaps] {};
     std::int64_t sum_ = 0;
 };

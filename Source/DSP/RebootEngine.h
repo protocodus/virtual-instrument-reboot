@@ -104,6 +104,7 @@ private:
     struct Slot {
         bool busy = false;
         bool gate = false;       // the key still holds it
+        bool fallback = false;   // borrowing another channel because the selected part cannot reach the pitch
         bool started = false;    // the channel has been started for this note
         int key = 0, velocity = 0;
         Voice voice = Voice::Pulse;
@@ -122,16 +123,20 @@ private:
     struct Key {
         int key = 0, velocity = 0;
         bool down = false;       // false: held only by the pedal
+        bool waitingForPitch = false;  // Poly note-on fell outside both register ranges
     };
 
     // Slot s is on machine s / kMaxChannels, channel s % kMaxChannels.
     static int Channel(int slot) noexcept { return slot % Machine::kMaxChannels; }
     static int BoardOf(int slot) noexcept { return slot / Machine::kMaxChannels; }
 
-    void Apply(bool reset, bool revoice);
+    void Apply(bool forceReset);
     void Revoice(bool reset);
-    void Strike(int key, int velocity);
+    void Strike(Key& note);
+    void RetryHeldPitches();
     void Lift(int key);
+    void ReleaseKey(int key);
+    void FollowHeld();
     int StartNote(int key, int velocity);
     void Retarget(int key, int velocity, bool glide);
     void Restart(Slot& n) const noexcept;
@@ -146,9 +151,8 @@ private:
     bool Compose(int slot, ChannelSettings& s, double cents = 0.0) const;
     void Send(int slot, const ChannelSettings& s, bool start);
     void Write(int slot);
-    void WriteMono();
     void Tick();
-    [[nodiscard]] int ArpKey(int index) const noexcept;
+    [[nodiscard]] const Key& NextArpKey(int after) const noexcept;
     [[nodiscard]] int HeldIndex(int key) const noexcept;
 
     Machine machines_[kMaxBoards];
@@ -167,10 +171,14 @@ private:
     double fine_ = 0.0;
     double attack_ = 0.0, decay_ = 0.0, release_ = 0.0;   // in frames
     double trim_ = 1.0;                 // LevelTrims.h, for the part and shape
-    double trimHeard_ = 1.0;            // the trim the last block ended at
+    // One native Rack quantum at the host rate. Count internal samples so
+    // automation remains continuous through smaller or split render blocks.
+    static constexpr int kTrimRampFrames = 64;
+    float trimStart_ = 1.0f, trimStep_ = 0.0f;
+    int trimFramesLeft_ = 0;
     double frameHz_ = 60.0, vibratoStep_ = 0.0;
     int vibratoDelay_ = 0, glideFrames_ = 0;
-    int arpIndex_ = 0, arpCount_ = 0;
+    int arpKey_ = 0, arpCount_ = 0;
     std::int64_t tickNum_ = 0, periodNum_ = 1, periodDen_ = 1;
 
     int rate_ = 48000;
@@ -181,9 +189,10 @@ private:
     double vibratoDepth_ = 0.0, velocity_ = 0.5, gain_ = 0.0;
     double bend_ = 0.0, wheel_ = 0.0, tune_ = 0.0;
     bool pedal_ = false;
+    bool retryPitch_ = false;
     std::uint64_t age_ = 0;
 
-    Decimator decimators_[2];
+    StereoDecimator decimator_;
     // The machines' left and right, then the Double set's, at the machines'
     // rate; the bus's left and right are 0 and 1 after the fold.
     float bus_[4][StepBuffer::kMaxFrames] {};
