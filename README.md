@@ -1,18 +1,12 @@
 # Reboot
 
-Reboot is a sound-chip synthesizer: the sound hardware of two 8-bit
-machines, emulated from the published specifications of their chips and
-played from a keyboard. The handheld board is the APU from the Game Boy and
-Game Boy Color; the console board the 2A03 from the NES and Famicom (the
-2A07 on the PAL console), with the Famicom's cartridge chips beside it:
-Konami's VRC6, Nintendo's MMC5, Namco's 163, the Famicom Disk System's wave
-unit and Sunsoft's 5B. Every chip is an integer core that runs on its
-machine's own clock, and a keyboard plays it through register writes, as a
-game's sound driver did, so the chip's own pitch steps, volume steps and
-quirks are what is heard. This repository holds the JUCE-free C++17 engine,
-its tools and its tests. Reboot is being built as a Rack Extension for
-Reason, which plays this engine; a plug-in front end is not built yet, and
-this repository has no release.
+Reboot plays two 8-bit machines from a keyboard. Handheld uses the Game Boy Color
+APU. Console uses the NTSC Famicom 2A03 with five optional cartridge chips:
+Konami VRC6, Nintendo MMC5, Namco 163, the Famicom Disk System wave unit and
+Sunsoft 5B. Each chip runs on its own clock. Real mode shapes notes with the
+chip’s volume registers. Fake mode adds a continuous envelope to each
+voice, including the triangle. This repository holds the C++17 engine,
+its offline tools and its tests. The Reason Rack Extension embeds this engine.
 
 ## Audio demos
 
@@ -29,12 +23,12 @@ on four consoles.
 
 | # | Preset | Demo | Length | Peak |
 | --- | --- | --- | --- | --- |
-| 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -11.9 dBFS |
-| 2 | Wave Bass | [02-wave-bass.wav](Docs/audio/02-wave-bass.wav) | 8.4 s | -12.8 dBFS |
+| 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -11.3 dBFS |
+| 2 | Wave Bass | [02-wave-bass.wav](Docs/audio/02-wave-bass.wav) | 8.4 s | -11.9 dBFS |
 | 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -15.5 dBFS |
-| 4 | Static Snare | [04-static-snare.wav](Docs/audio/04-static-snare.wav) | 10.8 s | -15.5 dBFS |
-| 5 | Triangle Bass | [05-triangle-bass.wav](Docs/audio/05-triangle-bass.wav) | 8.3 s | -17.9 dBFS |
-| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -19.5 dBFS |
+| 4 | Static Snare | [04-static-snare.wav](Docs/audio/04-static-snare.wav) | 10.8 s | -16.6 dBFS |
+| 5 | Triangle Bass | [05-triangle-bass.wav](Docs/audio/05-triangle-bass.wav) | 8.3 s | -15.6 dBFS |
+| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -19.1 dBFS |
 | 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -18.2 dBFS |
 | 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -8.3 dBFS |
 
@@ -47,6 +41,12 @@ Tools/update_readme_blocks.py demos --readme README.md --manifest
 WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
+
+### 0.6.0 — 2026-11-20 — song tempo and envelope modes
+
+Sync locks the arpeggiator and vibrato LFO to the host’s tempo and song position. Each rate control independently selects a note division from 1/32 through a whole note, including eighth- and quarter-note triplets. Stopped transport supports live audition at the song tempo.
+
+Real preserves chip volume steps and frame-rate envelopes. Fake gives each playing channel a sample-rate envelope and fractional sustain. Both modes follow velocity, Mono legato, the sustain pedal and arpeggio retriggers. Older patches load with Real and free timing. Their board selection now resolves to Color Handheld or the cartridge-capable Famicom Console. The saved revision field is accepted for compatibility. On matching Color and Famicom settings, Real produced byte-identical output to 0.5.2 across 954,000 stereo frames at 44.1 kHz and 2× oversampling.
 
 ### 0.5.2 — 2026-11-20 — held notes and rendering cost
 
@@ -271,7 +271,7 @@ reviewed, including the 0.5.1 pulse-sequencer audit, is in the
   are locked (DMG 2-T-cycle window) or redirected (CGB), CGB-04/DMG zombie
   volume writes (`NRx2`), DMG `NR52=0` length preservation, and SameBoy-reported
   CH3 6-T-cycle trigger delay and 2-T-cycle DMG Wave RAM retrigger corruption
-  window. Revisions: the original (DMG) and the Color (CGB).
+  window. The instrument selects Color (CGB). The original (DMG) remains in the chip conformance tests.
 - **DACs and mixer (spec, 50 us decay reported):** a DAC on maps 0 to 15 to
   analog +1 to -1, off decays toward 0 over 50 us on Line; NR51 sends channels
   to each side and NR50 scales the sides.
@@ -289,7 +289,10 @@ reviewed, including the 0.5.1 pulse-sequencer audit, is in the
   neither. The amplifier's gain, the headphone socket and the speaker are
   not modelled.
 
-### The console (NES, Famicom, PAL NES)
+### The console (Famicom)
+
+The instrument selects the NTSC Famicom for all Console patches. The
+front-loader and PAL implementations remain available to low-level board tests.
 
 - **Chip (spec):** the NESdev Wiki's APU pages: two pulses with sweep, the
   triangle, the noise channel's two modes, the DMC's held level, the
@@ -401,15 +404,14 @@ machine blackbox.
   On FDS above ~1747 Hz and 8-channel Namco 163 above ~3728 Hz, the driver folds
   multiple harmonic cycles into wavetable RAM so high notes up to C8 play on
   the cartridge chip itself.
-- **Frames.** Everything that moves while a note sounds (the envelope's
-  volume steps, vibrato, glide, the pitch wheel, the host's master tuning,
-  the arpeggio) is written at the machines' frame, as a game's driver ran
-  on its video frame: 59.73 Hz on the handheld, 60.10 or 50.01 Hz on the
-  console. A note's own start and end land on its sample, and CH3's `NR32`
+- **Frames.** Real envelopes, vibrato, glide and free-running arpeggio steps
+  write registers at the machine frame rate, 59.73 Hz on Handheld and
+  60.10 Hz on Console. With Sync on, the arp strikes at musical boundaries
+  and the vibrato samples the song phase at each machine frame. A note's own start and end land on its sample, and CH3's `NR32`
   timer ISR fires at its exact master cycle between frames.
 - **Envelopes** are times: Attack from silence to full, Decay from full
   down to Sustain, Release from where the key leaves the note down to
-  silence. Each frame the envelope moves by the share of its stage that a
+  silence. In Real mode the envelope moves each frame by the share of its stage that a
   frame is, and the chip's own volume register is written the native step
   it has reached (`0..32` on FDS `$4080`, `0..42` on VRC6 sawtooth `$B000`,
   `0..3` on handheld CH3, `0..1` gate on APU triangle, `0..15` elsewhere;
@@ -417,13 +419,16 @@ machine blackbox.
   and noise, switching 15/7-bit LFSR width retriggers cleanly to prevent all-1s
   lock-up, and retriggering a silent `$08`-parked channel skips redundant `$08`
   writes so DMG zombie mode cannot blip `0 -> 1` before trigger. Mono's legato
-  notes keep their envelope; each Arp step starts it again.
+  notes keep their envelope; each Arp step starts it again. In Fake mode each
+  note instead has a sample-rate gain applied to its channel in the board
+  mixer. This follows the same stage times with continuous amplitude and
+  sustain on every voice, including the triangle and cartridge voices.
 - **Voices.** One voice plays up to eight machines of one board
-  (**Boards**), with its revision, expansion, bias and path. A note takes
+  (**Boards**), with its expansion, bias and path. A note takes
   the free channel of the part, on any of the machines, that was freed
   longest ago, else the oldest released note's, else the oldest note's.
   **Mode** is Poly, Mono (legato, with glide) or Arp (one voice stepping
-  through the held keys every Arp rate frames).
+  through the held keys at the selected rate).
 - **Waves** for the wave channels are our own harmonic waves
   (`Tools/generate_waves.py`), scaled to each chip's range.
 - **Level.** Every part and shape arrives at one loudness: that of one
@@ -440,20 +445,21 @@ machine blackbox.
 
 | Control | Range | What it does |
 | --- | --- | --- |
-| Board | Handheld, Console | the machine |
-| Revision | per board (above) | the machine's model |
+| Board | Handheld, Console | Color Handheld or NTSC Famicom |
 | Expansion | none, A to E | the Famicom's cartridge chip |
 | Expansion channels | 1 to 8 | how many channels expansion C runs |
 | Bias | 0 to 127 | the console's held DMC level |
 | Path | Pin, Line | the chips' DACs and mixer, or the machine's output stage |
 | Boards | 1 to 8 | the machines played at once |
 | Part, Shape | per board | the channels the voice plays, and their duty, wave or noise mode |
-| Level, Sustain | 0 to 15 | the chip's volume steps, and the held share of them |
+| Envelope | Real, Fake | chip register envelope or continuous per-voice envelope |
+| Level, Sustain | 0 to 15 | peak level and held share of that peak. Fake accepts fractional Sustain |
 | Attack, Decay, Release | 0 to 5000 ms | the envelope's times |
 | Transpose, Fine, Mod | ±24 semitones, ±50 cents, 0 to 63 | pitch, and the disk unit's modulation depth |
 | Mode | Poly, Mono, Arp | how keys take voices |
-| Arp rate | 1 to 8 frames | frames an arpeggio step holds |
-| Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz, 0 to 1000 ms | written at the frame; the mod wheel adds up to 50 cents |
+| Sync | Off, On | follows song tempo and position for both Arp and Vibrato |
+| Arp rate | 1 to 8 frames, or synced divisions | duration of each arp step |
+| Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz or synced divisions, 0 to 1000 ms | written at the frame; the mod wheel adds up to 50 cents |
 | Glide | 0 to 1000 ms | a Mono legato note's slide |
 | Bend range | 0 to 12 semitones | the pitch wheel |
 | Velocity | 0 to 1 | how far a key's velocity scales the level |

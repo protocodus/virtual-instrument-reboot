@@ -110,10 +110,14 @@ public:
                 rule.with.push_back({ static_cast<std::size_t>(s.first), Normalised(s.first, s.second) });
         };
         switch (static_cast<int>(index)) {
+        case kRevision:
+            rule.reach = Reach::Exempt;
+            rule.reason = "legacy patch field; the board selects the hardware";
+            break;
         case kExpansion:
             // A cartridge chip sounds only on the Famicom's slot, through
             // its own part.
-            with({ { kBoard, 1 }, { kRevision, 1 }, { kPart, 3 } });
+            with({ { kBoard, 1 }, { kPart, 3 } });
             break;
         case kExpansionChannels:
             // On one machine the count is how many of the chord's notes the
@@ -122,7 +126,7 @@ public:
             // multiplex, which each channel joins at its own place: the
             // replay after the reset puts the probes' notes on other
             // channels than T's playing does.
-            with({ { kBoard, 1 }, { kRevision, 1 }, { kExpansion, 3 }, { kPart, 3 }, { kBoards, 1 } });
+            with({ { kBoard, 1 }, { kExpansion, 3 }, { kPart, 3 }, { kBoards, 1 } });
             rule.history = "which of the multiplexed channels each note takes follows the order the playing freed them";
             break;
         case kBias:
@@ -130,9 +134,7 @@ public:
             with({ { kBoard, 1 }, { kPart, 1 } });
             break;
         case kPath:
-            // The handheld original's 28 Hz corner is all but the Pin
-            // blocker's on a chord from G3 up; the console's line stage is
-            // not.
+            // Exercise the Console line stage against the chip pin.
             with({ { kBoard, 1 } });
             break;
         case kBoards:
@@ -156,11 +158,17 @@ public:
             rule.reason = "the decay falls from each note's peak, which held notes have passed";
             break;
         case kMod:
-            with({ { kBoard, 1 }, { kRevision, 1 }, { kExpansion, 4 }, { kPart, 3 } });
+            with({ { kBoard, 1 }, { kExpansion, 4 }, { kPart, 3 } });
             break;
         case kArpRate:
             with({ { kMode, 2 } });
             break;
+        case kFakeEnvelope:
+            // The gated triangle keeps its hardware amplitude in Real. Fake
+            // takes the fractional sustain on the note that is already held.
+            with({ { kBoard, 1 }, { kPart, 1 }, { kSustain, 4.5 } });
+            break;
+        case kTempoSync:
         case kVibratoRate:
             with({ { kVibratoDepth, 50 } });
             break;
@@ -211,12 +219,11 @@ private:
         if (c[kVolume] < -12.0)
             return false;
         const int board = static_cast<int>(c[kBoard] + 0.5);
-        const int revision = static_cast<int>(c[kRevision] + 0.5);
         const int expansion = static_cast<int>(c[kExpansion] + 0.5);
         const int part = static_cast<int>(c[kPart] + 0.5);
         const bool exists = board == 0
             ? part < 3
-            : part < 3 || (revision == 1 && ((part == 3 && expansion != 0) || (part == 4 && expansion == 1)));
+            : part < 3 || (part == 3 && expansion != 0) || (part == 4 && expansion == 1);
         return exists && c[kAttack] < 10.0 && c[kLevel] >= 12.0 && c[kSustain] >= 10.0;
     }
 

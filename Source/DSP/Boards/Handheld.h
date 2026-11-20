@@ -68,6 +68,7 @@ public:
 
     void Reset(int revision) noexcept {
         revision_ = revision;
+        softwareEnvelope_ = false;
         apu_.Reset(revision == kColor ? gb::Model::Cgb : gb::Model::Dmg);
         tb_.Set(gb::kClock, 1, rate_);
         mix_.Clear();
@@ -86,6 +87,22 @@ public:
         for (int c = 0; c < kChannels; ++c) {
             wasDacOn_[c] = false;
             lastChSide_[c][0] = 0.0, lastChSide_[c][1] = 0.0;
+        }
+    }
+
+    // Optional external VCA on each channel's DAC, ahead of its pan and the
+    // board's output capacitors. Register-driven playback uses the native mixer.
+    void SetEnvelopeMode(bool software) noexcept {
+        softwareEnvelope_ = software;
+        for (double& gain : envelopeGain_)
+            gain = 0.0;
+        Changed(apu_.Now());
+    }
+
+    void SetEnvelopeGain(int channel, double gain) noexcept {
+        if (envelopeGain_[channel] != gain) {
+            envelopeGain_[channel] = gain;
+            Changed(apu_.Now());
         }
     }
 
@@ -137,6 +154,7 @@ public:
     }
 
     [[nodiscard]] std::int64_t CycleAt(int frame) const noexcept { return tb_.CycleAt(frame); }
+    [[nodiscard]] int FrameAt(std::int64_t cycle) const noexcept { return static_cast<int>(tb_.Position(cycle, 0)); }
     [[nodiscard]] std::int64_t Now() const noexcept { return apu_.Now(); }
 
     void RunTo(std::int64_t cycle) {
@@ -217,7 +235,9 @@ private:
         for (int c = 0; c < kChannels; ++c) {
             if (!apu_.DacOn(c))
                 continue;
-            const double analog = 1.0 - 2.0 * apu_.Out(c) / 15.0;
+            double analog = 1.0 - 2.0 * apu_.Out(c) / 15.0;
+            if (softwareEnvelope_)
+                analog *= envelopeGain_[c];
             if (nr51 & (0x10 << c))
                 chSide[c][0] = analog * masterLeft;
             if (nr51 & (0x01 << c))
@@ -239,6 +259,8 @@ private:
         }
     }
 
+    bool softwareEnvelope_ = false;
+    double envelopeGain_[kChannels] {};
     int rate_ = 48000;
     int revision_ = kOriginal;
     gb::Apu apu_;

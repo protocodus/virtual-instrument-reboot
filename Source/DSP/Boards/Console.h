@@ -131,6 +131,7 @@ public:
 
     void Reset(int revision, int cartridge) noexcept {
         revision_ = revision;
+        softwareEnvelope_ = false;
         cartridge_ = revision == kFamicom ? cartridge : kNone;
         const nes::Region region = revision == kPal ? nes::Region::Pal : nes::Region::Ntsc;
         apu_.Reset(region);
@@ -164,6 +165,25 @@ public:
         ApuChanged(0);
         CartChanged(0);
         SettleOutputStages();
+    }
+
+    // Optional independent VCAs. The four APU channels precede the
+    // cartridge channels in the player's numbering. Bias remains on the bus.
+    void SetEnvelopeMode(bool software) noexcept {
+        softwareEnvelope_ = software;
+        envelopeGain_.fill(0.0);
+        ApuChanged(apu_.Now());
+        CartChanged(apu_.Now());
+    }
+
+    void SetEnvelopeGain(int channel, double gain) noexcept {
+        if (envelopeGain_[channel] == gain)
+            return;
+        envelopeGain_[channel] = gain;
+        if (channel < 4)
+            ApuChanged(apu_.Now());
+        else
+            CartChanged(apu_.Now());
     }
 
     // Schedules a CPU bus write onto the console/cartridge memory map using
@@ -213,6 +233,7 @@ public:
     }
 
     [[nodiscard]] std::int64_t CycleAt(int frame) const noexcept { return tb_.CycleAt(frame); }
+    [[nodiscard]] int FrameAt(std::int64_t cycle) const noexcept { return static_cast<int>(tb_.Position(cycle, 0)); }
     [[nodiscard]] double CpuHz() const noexcept { return cpuHz_; }
     [[nodiscard]] std::int64_t Now() const noexcept { return apu_.Now(); }
 
@@ -283,7 +304,7 @@ private:
         switch (cartridge_) {
         case kVrc6: vrc6_.Run(cycle, cart); break;
         case kMmc5: mmc5_.Run(cycle, cart); break;
-        case kN163: n163_.Run(cycle, cart); break;
+        case kN163: n163_.Run(cycle, cart, softwareEnvelope_); break;
         case kFds: fds_.Run(cycle, cart); break;
         case k5B: s5b_.Run(cycle, cart); break;
         default: break;
@@ -347,7 +368,8 @@ private:
     }
 
     void ApuChanged(std::int64_t cycle) noexcept {
-        const int p = apu_.Out(nes::Apu::kPulse1) + apu_.Out(nes::Apu::kPulse2);
+        const int p1 = apu_.Out(nes::Apu::kPulse1), p2 = apu_.Out(nes::Apu::kPulse2);
+        const int p = p1 + p2;
         const int t = apu_.Out(nes::Apu::kTriangle);
         const int n = apu_.Out(nes::Apu::kNoise);
         const int d = apu_.Out(nes::Apu::kDmc);
@@ -355,7 +377,27 @@ private:
         if (p > 0)
             level += 95.88 / (8128.0 / p + 100.0);
         const double tnd = t / 8227.0 + n / 12241.0 + d / 22638.0;
-        if (tnd > 0.0)
+        if (softwareEnvelope_) {
+            // Blend each DAC's solo output and the nonlinear interaction.
+            // Muting one voice removes its loading on the other voice.
+            const double g1 = envelopeGain_[0], g2 = envelopeGain_[1];
+            const double solo1 = 95.88 * p1 / (8128.0 + 100.0 * p1);
+            const double solo2 = 95.88 * p2 / (8128.0 + 100.0 * p2);
+            level = g1 * solo1 + g2 * solo2 + g1 * g2 * (level - solo1 - solo2);
+
+            // Keep the resting DC bias on the bus. Scale triangle excursions
+            // around their centre so a slow fade does not move the DC level.
+            const auto transfer = [](double x) { return 159.79 * x / (1.0 + 100.0 * x); };
+            const double bias = d / 22638.0;
+            const double restInput = nes::kTriangleSteps[0] / 8227.0 + bias;
+            const double rest = transfer(restInput);
+            const double triangle = transfer(t / 8227.0 + bias);
+            const double centre = transfer(7.5 / 8227.0 + bias);
+            const double noise = transfer(restInput + n / 12241.0) - rest;
+            level += rest + envelopeGain_[2] * (triangle - centre)
+                          + envelopeGain_[3] * noise
+                          + envelopeGain_[2] * envelopeGain_[3] * (transfer(tnd) - triangle - noise);
+        } else if (tnd > 0.0)
             level += 159.79 / (1.0 / tnd + 100.0);
         const float levels[2] = { static_cast<float>(level), 0.0f };
         mix_.Set(0, tb_.Position(cycle, StepBuffer::kSubBits), levels);
@@ -367,13 +409,23 @@ private:
         int bus = 0;
         switch (cartridge_) {
         case kVrc6:
-            level = -(kPulse15 / 15.0) * (vrc6_.Out(0) + vrc6_.Out(1) + vrc6_.Out(2));
+            if (softwareEnvelope_)
+                level = -(kPulse15 / 15.0) * (vrc6_.Out(0) * envelopeGain_[4] + vrc6_.Out(1) * envelopeGain_[5]
+                                           + vrc6_.Out(2) * envelopeGain_[6]);
+            else
+                level = -(kPulse15 / 15.0) * (vrc6_.Out(0) + vrc6_.Out(1) + vrc6_.Out(2));
             break;
         case kMmc5:
-            level = -(kPulse15 / 15.0) * (mmc5_.Out(0) + mmc5_.Out(1)) - kMmc5PcmStep * mmc5_.Out(2);
+            if (softwareEnvelope_)
+                level = -(kPulse15 / 15.0) * (mmc5_.Out(0) * envelopeGain_[4] + mmc5_.Out(1) * envelopeGain_[5])
+                      - kMmc5PcmStep * mmc5_.Out(2);
+            else
+                level = -(kPulse15 / 15.0) * (mmc5_.Out(0) + mmc5_.Out(1)) - kMmc5PcmStep * mmc5_.Out(2);
             break;
         case kN163:
             level = n163_.Out() * kN163Step;
+            if (softwareEnvelope_)
+                level *= envelopeGain_[4 + n163_.DacChannel()];
             break;
         case kFds: {
             static constexpr double kMaster[4] = { 1.0, 2.0 / 3.0, 2.0 / 4.0, 2.0 / 5.0 };
@@ -387,12 +439,14 @@ private:
                 fdsScheduleLength_ = sample + 1;
             }
             level = fds_.Out() * kFdsStep * kMaster[m];
+            if (softwareEnvelope_)
+                level *= envelopeGain_[4];
             bus = 1;
             break;
         }
         case k5B:
             for (int c = 0; c < 3; ++c)
-                level += k5BLevel[s5b_.Out(c)];
+                level += k5BLevel[s5b_.Out(c)] * (softwareEnvelope_ ? envelopeGain_[4 + c] : 1.0);
             bus = 1;
             break;
         default:
@@ -450,6 +504,8 @@ private:
     int cartridge_ = kNone;
     double cpuHz_ = 19687500.0 / 11.0;
     nes::Apu apu_;
+    bool softwareEnvelope_ = false;
+    std::array<double, 4 + 8> envelopeGain_ {};
     famicom::Vrc6 vrc6_;
     famicom::Mmc5 mmc5_;
     famicom::Namco163 n163_;

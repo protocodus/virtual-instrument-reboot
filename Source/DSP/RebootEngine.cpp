@@ -12,6 +12,9 @@ namespace {
 int Clamp(int v, int lo, int hi) noexcept { return v < lo ? lo : v > hi ? hi : v; }
 int Round(double v) noexcept { return static_cast<int>(std::floor(v + 0.5)); }
 
+// Ours: 1/32, 1/16, eighth triplet, 1/8, quarter triplet, 1/4, 1/2, whole.
+constexpr double kStepsPerQuarter[] = { 8.0, 4.0, 3.0, 2.0, 1.5, 1.0, 0.5, 0.25 };
+
 bool Same(const ChannelSettings& a, const ChannelSettings& b) noexcept {
     return a.voice == b.voice && a.period == b.period && a.volume == b.volume && a.shape == b.shape && a.mod == b.mod;
 }
@@ -23,6 +26,11 @@ void Engine::Prepare(double sampleRate, int oversampling) {
     if (!(sampleRate >= 8000.0 && sampleRate <= 768000.0))
         sampleRate = 48000.0;
     rate_ = Round(sampleRate);
+    bpm_ = 120.0;
+    beatsPerSample_ = bpm_ / (60.0 * rate_);
+    anchorBeat_ = 0.0;
+    framesFromAnchor_ = 0;
+    transportPlaying_ = false;
     oversampling_ = oversampling >= 8 ? 8 : oversampling >= 4 ? 4 : oversampling >= 2 ? 2 : 1;
     while (oversampling_ > 1 && rate_ * oversampling_ > kMaxInternalRate)
         oversampling_ /= 2;
@@ -52,6 +60,7 @@ void Engine::SetControls(const Controls& raw) {
         if (!(v >= info.min && v <= info.max))
             c[i] = v != v ? info.initial : v < info.min ? info.min : info.max;
     }
+    c[kRevision] = kControlInfo[kRevision].initial;
     if (c.value == controls_.value)
         return;
     retryPitch_ |= c[kTranspose] != controls_[kTranspose] || c[kFine] != controls_[kFine]
@@ -69,6 +78,18 @@ void Engine::Apply(bool forceReset) {
     const Controls& c = controls_;
     mode_ = Clamp(Round(c[kMode]), 0, 2);
     arpRate_ = Clamp(Round(c[kArpRate]), 1, 8);
+    const bool sync = c[kTempoSync] >= 0.5;
+    const double steps = kStepsPerQuarter[arpRate_ - 1];
+    if (sync != tempoSync_ || (sync && steps != arpStepsPerBeat_)) {
+        tempoSync_ = sync;
+        arpStepsPerBeat_ = steps;
+        arpCount_ = 0;
+        AlignArpGrid();
+    }
+    if (tempoSync_) {
+        const int division = 7 - Round(7 * ToNormalized(kVibratoRate, c[kVibratoRate]));
+        lfoCyclesPerBeat_ = kStepsPerQuarter[division];
+    }
     bendRange_ = Clamp(Round(c[kBendRange]), 0, 12);
     vibratoDepth_ = c[kVibratoDepth];
     velocity_ = c[kVelocity];
@@ -77,16 +98,17 @@ void Engine::Apply(bool forceReset) {
     part_ = Clamp(Round(c[kPart]), 0, Machine::kParts - 1);
     shape_ = Clamp(Round(c[kShape]), 0, 7);
     level_ = Clamp(Round(c[kLevel]), 0, 15);
-    sustain_ = Clamp(Round(c[kSustain]), 0, 15);
+    const bool wasFake = fakeEnvelope_;
+    fakeEnvelope_ = c[kFakeEnvelope] >= 0.5;
+    sustain_ = fakeEnvelope_ ? c[kSustain] : Clamp(Round(c[kSustain]), 0, 15);
     transpose_ = Clamp(Round(c[kTranspose]), -24, 24);
     fine_ = c[kFine];
     mod_ = Clamp(Round(c[kMod]), 0, 63);
 
     settings_.board = static_cast<BoardKind>(Clamp(Round(c[kBoard]), 0, static_cast<int>(BoardKind::Count) - 1));
     const bool console = settings_.board == BoardKind::Console;
-    const int revisions = console ? static_cast<int>(Console::kRevisions) : static_cast<int>(Handheld::kRevisions);
-    settings_.revision = Clamp(Round(c[kRevision]), 0, revisions - 1);
-    settings_.expansion = console && settings_.revision == Console::kFamicom
+    settings_.revision = InstrumentRevision(settings_.board);
+    settings_.expansion = console
         ? Clamp(Round(c[kExpansion]), 0, Console::kCartridges - 1) : Console::kNone;
     settings_.expansionChannels = settings_.expansion == Console::kN163 ? Clamp(Round(c[kExpansionChannels]), 1, 8) : 1;
     settings_.bias = Clamp(Round(c[kBias]), 0, 127);
@@ -125,15 +147,42 @@ void Engine::Apply(bool forceReset) {
         trimFramesLeft_ = duration;
         trim_ = targetTrim;
     }
-    attack_ = c[kAttack] / 1000.0 * frameHz_;
-    decay_ = c[kDecay] / 1000.0 * frameHz_;
-    release_ = c[kRelease] / 1000.0 * frameHz_;
+    if ((reset && fakeEnvelope_) || wasFake != fakeEnvelope_) {
+        for (int b = 0; b < boards_; ++b) {
+            machines_[b].SetEnvelopeMode(fakeEnvelope_);
+            if (double_)
+                twins_[b].SetEnvelopeMode(fakeEnvelope_);
+        }
+    }
+    const double envelopeHz = fakeEnvelope_ ? rate_ : frameHz_;
+    attack_ = c[kAttack] / 1000.0 * envelopeHz;
+    decay_ = c[kDecay] / 1000.0 * envelopeHz;
+    release_ = c[kRelease] / 1000.0 * envelopeHz;
     vibratoStep_ = c[kVibratoRate] / frameHz_;
     vibratoDelay_ = Round(c[kVibratoDelay] / 1000.0 * frameHz_);
     glideFrames_ = Round(c[kGlide] / 1000.0 * frameHz_);
     gain_ = std::pow(10.0, c[kVolume] / 20.0);
-    if (reset || oldMode != mode_ || oldPart != part_)
+    if (reset || oldMode != mode_ || oldPart != part_) {
+        movingEnvelope_ = false;
         Revoice(reset);
+    } else if (fakeEnvelope_ || wasFake) {
+        movingEnvelope_ = false;
+        for (int s = 0; s < boards_ * Machine::kMaxChannels; ++s) {
+            Slot& note = slots_[s];
+            if (!note.busy)
+                continue;
+            Settle(note);
+            if (wasFake != fakeEnvelope_) {
+                ChannelSettings settings;
+                if (!Compose(s, settings, -Spread()))
+                    settings.volume = 0;
+                Send(s, settings, false);
+            } else {
+                SetSoftwareGain(s);
+            }
+            movingEnvelope_ |= fakeEnvelope_ && note.stage != Stage::Sustained;
+        }
+    }
 }
 
 // Ends every note (after a reset, the machines are silent already) and
@@ -161,6 +210,7 @@ void Engine::Revoice(bool reset) {
     default: {
         const Key& first = NextArpKey(-1);
         arpKey_ = first.key, arpCount_ = 0;
+        AlignArpGrid();
         mono_ = StartNote(first.key, first.velocity);
         break;
     }
@@ -241,6 +291,10 @@ void Engine::NoteOn(int key, int velocity) {
     }
     if (HeldIndex(key) >= 0)
         Lift(key);
+    if (heldCount_ == 0 && tempoSync_ && !transportPlaying_) {
+        anchorBeat_ = 0.0;
+        framesFromAnchor_ = 0;
+    }
     held_[heldCount_++] = { key, Clamp(velocity, 1, 127), true };
     Strike(held_[heldCount_ - 1]);
 }
@@ -290,6 +344,38 @@ void Engine::SetTune(double cents) {
     const double next = std::isfinite(cents) ? std::clamp(cents, -100.0, 100.0) : 0.0;
     retryPitch_ |= next != tune_;
     tune_ = next;
+}
+
+double Engine::BeatAt(double frameOffset) const noexcept {
+    return anchorBeat_ + (static_cast<double>(framesFromAnchor_) + frameOffset) * beatsPerSample_;
+}
+
+void Engine::AlignArpGrid() noexcept {
+    nextArpStep_ = std::floor(BeatAt() * arpStepsPerBeat_ + 1.0e-10) + 1.0;
+}
+
+void Engine::SetTransport(double bpm, double quarterNotePosition, bool playing) {
+    if (!(bpm >= 1.0 && bpm <= 1000.0))
+        bpm = bpm_;
+    const double predicted = BeatAt();
+    // Reason rounds positions to one part in 15,360 of a beat. Preserve the
+    // sample anchor across that rounding when consecutive batches agree.
+    const bool hasPosition = playing && std::isfinite(quarterNotePosition)
+        && std::fabs(quarterNotePosition) <= 1.0e10;
+    const double difference = hasPosition ? std::fabs(quarterNotePosition - predicted) : 0.0;
+    const bool seek = hasPosition && (!transportPlaying_ || difference > 1.0 / 128.0);
+    if (bpm != bpm_ || seek || difference > 1.0 / 15360.0) {
+        anchorBeat_ = hasPosition ? quarterNotePosition : predicted;
+        framesFromAnchor_ = 0;
+        bpm_ = bpm;
+        beatsPerSample_ = bpm / (60.0 * rate_);
+    }
+    transportPlaying_ = playing;
+    if (seek && tempoSync_) {
+        AlignArpGrid();
+        if (mode_ == 2 && heldCount_ > 0)
+            PlayArpKey(NextArpKey(-1));
+    }
 }
 
 void Engine::ReleaseAll() {
@@ -346,6 +432,7 @@ void Engine::Strike(Key& note) {
         if (mono_ >= 0 && slots_[mono_].gate)
             break;
         arpKey_ = key, arpCount_ = 0;
+        AlignArpGrid();
         if (mono_ >= 0)
             End(mono_);
         mono_ = StartNote(key, velocity);
@@ -452,6 +539,7 @@ int Engine::StartNote(int key, int velocity, bool maySteal) {
     // A note at sustain 0 keeps its channel while the key holds it, silent,
     // so that raising the sustain brings it back.
     Settle(n);
+    movingEnvelope_ |= fakeEnvelope_ && n.stage != Stage::Sustained;
     ChannelSettings s;
     Compose(best, s, -Spread());
     Send(best, s, true);
@@ -470,10 +558,11 @@ void Engine::Retarget(int key, int velocity, bool glide) {
 }
 
 // The envelope from the start, as a new note's: the arpeggio's steps.
-void Engine::Restart(Slot& n) const noexcept {
+void Engine::Restart(Slot& n) noexcept {
     n.stage = Stage::Attack;
     n.env = 0.0;
     Settle(n);
+    movingEnvelope_ |= fakeEnvelope_ && n.stage != Stage::Sustained;
 }
 
 void Engine::ReleaseSlot(int slot) {
@@ -484,12 +573,18 @@ void Engine::ReleaseSlot(int slot) {
     Settle(n);
     if (n.env <= 0.0)
         End(slot);
+    else
+        movingEnvelope_ |= fakeEnvelope_;
 }
 
 void Engine::End(int slot) {
     Slot& n = slots_[slot];
     if (!n.busy)
         return;
+    if (fakeEnvelope_) {
+        n.env = 0.0;
+        SetSoftwareGain(slot);
+    }
     if (n.started) {
         machines_[BoardOf(slot)].Stop(Channel(slot));
         if (double_)
@@ -546,6 +641,34 @@ void Engine::StepEnvelope(Slot& n) const noexcept {
     Settle(n);
 }
 
+// The native oscillator runs at full resolution while this gain moves.
+// The board applies each voice's gain before its analog output circuitry.
+void Engine::SetSoftwareGain(int slot) {
+    const Slot& n = slots_[slot];
+    const double gain = Gain(n);
+    const int b = BoardOf(slot), ch = Channel(slot);
+    machines_[b].SetEnvelopeGain(ch, n.written.volume ? gain : 0.0);
+    if (double_)
+        twins_[b].SetEnvelopeGain(ch, n.twin.volume ? gain : 0.0);
+}
+
+void Engine::AdvanceSoftwareEnvelopes() {
+    movingEnvelope_ = false;
+    for (int s = 0; s < boards_ * Machine::kMaxChannels; ++s) {
+        Slot& n = slots_[s];
+        if (!n.busy || n.stage == Stage::Sustained)
+            continue;
+        if (n.stage != Stage::Released || n.env > 0.0)
+            StepEnvelope(n);
+        if (n.stage == Stage::Released && n.env <= 0.0)
+            End(s);
+        else {
+            SetSoftwareGain(s);
+            movingEnvelope_ |= n.stage != Stage::Sustained;
+        }
+    }
+}
+
 double Engine::Pitch(const Slot& n, double cents) const {
     double semitones = n.key + transpose_ + (fine_ + cents + tune_) / 100.0 + n.glide + bend_ * bendRange_;
     const double depth = vibratoDepth_ + 50.0 * wheel_;
@@ -570,7 +693,7 @@ bool Engine::Compose(int slot, ChannelSettings& s, double cents) const {
     s.voice = n.voice;
     s.shape = shape_ % m.Shapes(ch, n.voice);
     s.mod = mod_;
-    s.volume = m.QuantizeVolume(ch, n.voice, Gain(n));
+    s.volume = m.QuantizeVolume(ch, n.voice, fakeEnvelope_ ? 1.0 : Gain(n));
     if (m.PeriodFor(ch, n.voice, Pitch(n, cents), s.shape, s.period))
         return true;
     s.period = n.started ? n.written.period : s.period;
@@ -589,8 +712,11 @@ void Engine::Send(int slot, const ChannelSettings& s, bool start) {
     else if (!Same(s, n.written))
         machine.Change(ch, s);
     n.written = s;
-    if (!double_)
+    if (!double_) {
+        if (fakeEnvelope_)
+            SetSoftwareGain(slot);
         return;
+    }
     // Where the detune takes the note out of the channel's reach, the
     // Double set plays the first set's period.
     ChannelSettings t;
@@ -602,6 +728,8 @@ void Engine::Send(int slot, const ChannelSettings& s, bool start) {
     else if (!Same(t, n.twin))
         twin.Change(ch, t);
     n.twin = t;
+    if (fakeEnvelope_)
+        SetSoftwareGain(slot);
 }
 
 // Preserve the note's envelope, glide and vibrato across a channel handoff.
@@ -644,21 +772,43 @@ void Engine::Write(int slot) {
     Send(slot, s, false);
 }
 
-// The machines' frame: the arpeggio, whose every step starts the envelope
-// again, then each note's envelope, glide, vibrato and pitch wheel.
-void Engine::Tick() {
+void Engine::PlayArpKey(const Key& next) {
+    arpKey_ = next.key;
+    if (mono_ >= 0 && slots_[mono_].gate) {
+        Restart(slots_[mono_]);
+        Retarget(next.key, next.velocity, false);
+    } else {
+        mono_ = StartNote(next.key, next.velocity);
+    }
+}
+
+// Split at the first host sample on or after the musical boundary. Compute
+// every boundary from the tempo anchor, so fractional periods cannot drift.
+int Engine::FramesUntilArpStep(int frames) {
+    double due = (nextArpStep_ / arpStepsPerBeat_ - anchorBeat_) / beatsPerSample_ - framesFromAnchor_;
+    constexpr double rounding = 1.0e-7;  // sample units, for exact integer boundaries
+    if (due <= rounding) {
+        PlayArpKey(NextArpKey(arpKey_));
+        ++nextArpStep_;
+        due += 1.0 / (arpStepsPerBeat_ * beatsPerSample_);
+    }
+    return due >= frames ? frames : std::max(1, static_cast<int>(std::ceil(due - rounding)));
+}
+
+// The free arp, envelope, glide and pitch modulation write the machine's
+// registers on video frames. The synced arp strikes on the song grid.
+void Engine::Tick(std::int64_t cycle) {
     int restarted = -1;
-    if (mode_ == 2 && heldCount_ > 0 && ++arpCount_ >= arpRate_) {
+    if (!tempoSync_ && mode_ == 2 && heldCount_ > 0 && ++arpCount_ >= arpRate_) {
         arpCount_ = 0;
-        const Key& next = NextArpKey(arpKey_);
-        arpKey_ = next.key;
-        if (mono_ >= 0 && slots_[mono_].gate) {
-            Restart(slots_[mono_]);
-            Retarget(next.key, next.velocity, false);
-        } else {
-            mono_ = StartNote(next.key, next.velocity);
-        }
+        PlayArpKey(NextArpKey(arpKey_));
         restarted = mono_;
+    }
+    double songPhase = 0.0;
+    if (tempoSync_) {
+        const double frame = static_cast<double>(machines_[0].FrameAt(cycle)) / oversampling_;
+        const double cycles = BeatAt(frame) * lfoCyclesPerBeat_;
+        songPhase = cycles - std::floor(cycles);
     }
     int writes[kSlots];
     int count = 0;
@@ -668,15 +818,19 @@ void Engine::Tick() {
             continue;
         ++n.frames;
         if (n.frames > vibratoDelay_) {
-            n.phase += vibratoStep_;
-            n.phase -= std::floor(n.phase);
+            if (tempoSync_) {
+                n.phase = songPhase;
+            } else {
+                n.phase += vibratoStep_;
+                n.phase -= std::floor(n.phase);
+            }
         }
         if (n.glideLeft > 0) {
             n.glide -= n.glide / n.glideLeft;
             --n.glideLeft;
         }
         // A step's new envelope starts on this frame, as a new note's does.
-        if (s != restarted)
+        if (!fakeEnvelope_ && s != restarted)
             StepEnvelope(n);
         if (n.env <= 0.0 && n.stage == Stage::Released) {
             End(s);
@@ -695,15 +849,20 @@ void Engine::Tick() {
 void Engine::Process(float* left, float* right, int frames) {
     const int most = StepBuffer::kMaxFrames / oversampling_;
     while (frames > 0) {
-        const int n = frames < most ? frames : most;
+        int n = frames < most ? frames : most;
+        if (tempoSync_ && mode_ == 2 && heldCount_ > 0)
+            n = FramesUntilArpStep(n);
         const int m = n * oversampling_;   // at the machines' rate
         for (float* bus : bus_)
             for (int i = 0; i < m; ++i)
                 bus[i] = 0.0f;
         const std::int64_t end = machines_[0].CycleAt(m);
+        int envelopeFrame = 0;
         for (;;) {
             const std::int64_t tick = (tickNum_ + periodDen_ - 1) / periodDen_;
-            std::int64_t next = tick;
+            const bool moving = movingEnvelope_;
+            const std::int64_t envelopeCycle = moving ? machines_[0].CycleAt(envelopeFrame * oversampling_) : end;
+            std::int64_t next = Earliest(tick, envelopeCycle);
             for (int b = 0; b < boards_; ++b) {
                 next = Earliest(next, machines_[b].NextEvent());
                 if (double_)
@@ -719,9 +878,15 @@ void Engine::Process(float* left, float* right, int frames) {
                     twins_[b].ServiceAt(next);
                 }
             }
+            if (next == envelopeCycle) {
+                AdvanceSoftwareEnvelopes();
+                ++envelopeFrame;
+            }
             if (next == tick) {
-                Tick();
+                Tick(tick);
                 tickNum_ += periodNum_;
+                if (!moving && movingEnvelope_)
+                    envelopeFrame = machines_[0].FrameAt(tick) / oversampling_ + 1;
             }
         }
         for (int b = 0; b < boards_; ++b) {
@@ -755,6 +920,7 @@ void Engine::Process(float* left, float* right, int frames) {
             left[i] = frame[0];
             right[i] = frame[1];
         }
+        framesFromAnchor_ += n;
         left += n, right += n, frames -= n;
     }
 }

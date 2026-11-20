@@ -16,24 +16,21 @@
 
 namespace protocodus::reboot {
 
-// A row of the table is one machine as it runs, on one path: the handheld's
-// two revisions; the front-loader and the PAL console; the Famicom alone and
+// A row holds one machine on one path: the Color Handheld, the Famicom alone and
 // with cartridges A, B, D and E; then the Famicom with cartridge C at each
 // of its channel counts. Each row holds every part's eight shapes.
-constexpr int kTrimVariants = 2 + 2 + 5 + 8;
+constexpr int kTrimVariants = 1 + 5 + 8;
 constexpr int kTrimRows = kTrimVariants * 2;
 constexpr int kTrimShapes = 8;
 
 constexpr int TrimVariant(const MachineSettings& s) noexcept {
     if (s.board == BoardKind::Handheld)
-        return s.revision;
-    if (s.revision != Console::kFamicom)
-        return s.revision == Console::kPal ? 3 : 2;
+        return 0;
     switch (s.expansion) {
-    case Console::kN163: return 9 + s.expansionChannels - 1;
-    case Console::kFds: return 7;
-    case Console::k5B: return 8;
-    default: return 4 + s.expansion;   // none, cartridges A and B
+    case Console::kN163: return 6 + s.expansionChannels - 1;
+    case Console::kFds: return 4;
+    case Console::k5B: return 5;
+    default: return 1 + s.expansion;   // none, cartridges A and B
     }
 }
 

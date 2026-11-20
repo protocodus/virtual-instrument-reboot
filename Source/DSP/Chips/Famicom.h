@@ -374,18 +374,22 @@ public:
     // The DAC's value: the last updated channel's (sample - 8) x volume.
     [[nodiscard]] int Out() const noexcept { return out_; }
     [[nodiscard]] int Channels() const noexcept { return ((ram_[0x7F] >> 4) & 7) + 1; }
+    // Logical channel holding the multiplexed DAC, numbered in driver order.
+    [[nodiscard]] int DacChannel() const noexcept { return dacChannel_; }
     [[nodiscard]] std::uint8_t Ram(int address) const noexcept { return ram_[address & 0x7F]; }
 
     template <class Sink>
-    void Run(std::int64_t to, Sink& sink) {
+    void Run(std::int64_t to, Sink& sink, bool separateChannels = false) {
         for (;;) {
             const std::int64_t next = live_ ? Earliest(to, slotDue_) : to;
             if (next >= to)
                 break;
             now_ = next;
+            const int previousChannel = dacChannel_;
             Slot();
             slotDue_ += kSlot;
-            if (Update())
+            // Equal DAC codes on adjacent slots can have different VCA gains.
+            if (Update() || (separateChannels && out_ != 0 && previousChannel != dacChannel_))
                 sink(now_);
         }
         now_ = to;
@@ -425,7 +429,8 @@ private:
     // speculative there). Channels are taken from 8 downwards.
     void Slot() noexcept {
         const int count = Channels();
-        const int channel = 7 - (slot_ % count);
+        dacChannel_ = slot_ % count;
+        const int channel = 7 - dacChannel_;
         slot_ = (slot_ + 1) % count;
         std::uint8_t* r = ram_ + 0x40 + 8 * channel;
         const std::uint32_t freq = r[0] | (r[2] << 8) | ((r[4] & 3) << 16);
@@ -490,7 +495,7 @@ private:
 
     std::int64_t now_ = 0, slotDue_ = 0;
     std::uint8_t ram_[128] {};
-    int pointer_ = 0, slot_ = 0, dac_ = 0, out_ = 0;
+    int pointer_ = 0, slot_ = 0, dac_ = 0, out_ = 0, dacChannel_ = 0;
     bool increment_ = false, disabled_ = false, live_ = false;
 };
 

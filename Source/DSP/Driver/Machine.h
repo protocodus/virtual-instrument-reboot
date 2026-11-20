@@ -24,6 +24,10 @@ namespace protocodus::reboot {
 
 enum class BoardKind : int { Handheld, Console, Count };
 
+constexpr int InstrumentRevision(BoardKind board) noexcept {
+    return board == BoardKind::Handheld ? static_cast<int>(Handheld::kColor) : static_cast<int>(Console::kFamicom);
+}
+
 struct MachineSettings {
     BoardKind board = BoardKind::Handheld;
     int revision = 0;
@@ -157,6 +161,11 @@ public:
         }
     }
 
+    // Internal sample containing this chip cycle within the current render block.
+    [[nodiscard]] int FrameAt(std::int64_t cycle) const noexcept {
+        return kind_ == BoardKind::Handheld ? handheld_.FrameAt(cycle) : console_.FrameAt(cycle);
+    }
+
     [[nodiscard]] std::int64_t NextEvent() const noexcept {
         return kind_ == BoardKind::Handheld ? handheldDriver_.NextEvent() : INT64_MAX;
     }
@@ -206,6 +215,20 @@ public:
         case BoardKind::Handheld: handheldDriver_.Stop(handheld_, channel); break;
         default: consoleDriver_.Stop(console_, channel); break;
         }
+    }
+
+    void SetEnvelopeMode(bool software) noexcept {
+        if (kind_ == BoardKind::Handheld)
+            handheld_.SetEnvelopeMode(software);
+        else
+            console_.SetEnvelopeMode(software);
+    }
+
+    void SetEnvelopeGain(int channel, double gain) noexcept {
+        if (kind_ == BoardKind::Handheld)
+            handheld_.SetEnvelopeGain(channel, gain);
+        else
+            console_.SetEnvelopeGain(channel, gain);
     }
 
     void SetBias(int level) {

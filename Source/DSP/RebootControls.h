@@ -20,7 +20,7 @@ namespace protocodus::reboot {
 enum Control : int {
     // The machines.
     kBoard,             // 0 Handheld, 1 Console
-    kRevision,          // the board's revision (README, How it works); past the board's last, its last
+    kRevision,          // reserved for older patches; the instrument chooses the board model
     kExpansion,         // the Console's cartridge chip: 0 none, then A to E
     kExpansionChannels, // how many channels expansion C runs, 1 to 8
     kBias,              // the Console's held DMC level, 0 to 127
@@ -50,6 +50,8 @@ enum Control : int {
     kDouble,            // 0 one set of machines; 1 a second set too, the first left and the second right
     kDetune,            // cents between the two sets with Double, half of it either way
     kVolume,            // output level, dB: our trim after the machines (README, How it works)
+    kTempoSync,         // lock arp steps and vibrato cycles to musical divisions
+    kFakeEnvelope,      // 0 hardware levels and gating, 1 continuous per-voice ADSR
     kControlCount
 };
 
@@ -68,7 +70,7 @@ struct ControlInfo {
 
 inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "board", "Board", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
-    { "revision", "Revision", 0.0, 2.0, 0.0, 3, Curve::kStepped, "" },
+    { "revision", "Revision", 0.0, 2.0, 1.0, 3, Curve::kStepped, "" },
     { "expansion", "Expansion", 0.0, 5.0, 0.0, 6, Curve::kStepped, "" },
     { "expansion_channels", "Expansion channels", 1.0, 8.0, 4.0, 8, Curve::kStepped, "" },
     { "bias", "Bias", 0.0, 127.0, 0.0, 0, Curve::kInteger, "" },
@@ -79,7 +81,7 @@ inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "level", "Level", 0.0, 15.0, 12.0, 0, Curve::kInteger, "" },
     { "attack", "Attack", 0.0, 5000.0, 0.0, 0, Curve::kCubic, "ms" },
     { "decay", "Decay", 0.0, 5000.0, 400.0, 0, Curve::kCubic, "ms" },
-    { "sustain", "Sustain", 0.0, 15.0, 10.0, 0, Curve::kInteger, "" },
+    { "sustain", "Sustain", 0.0, 15.0, 10.0, 0, Curve::kLinear, "" },
     { "release", "Release", 0.0, 5000.0, 250.0, 0, Curve::kCubic, "ms" },
     { "transpose", "Transpose", -24.0, 24.0, 0.0, 0, Curve::kInteger, "semitones" },
     { "fine", "Fine", -50.0, 50.0, 0.0, 0, Curve::kLinear, "cents" },
@@ -95,6 +97,8 @@ inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "double", "Double", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
     { "detune", "Detune", 0.0, 50.0, 8.0, 0, Curve::kLinear, "cents" },
     { "volume", "Volume", -24.0, 6.0, 0.0, 0, Curve::kLinear, "dB" },
+    { "tempo_sync", "Tempo Sync", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
+    { "fake_envelope", "Envelope Mode", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
 } };
 
 // The value of control `index` at normalised position n (clamped to 0..1).

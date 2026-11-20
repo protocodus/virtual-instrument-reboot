@@ -104,23 +104,22 @@ double ReferencePower() {
 }
 
 struct Variant {
-    int board, revision, expansion, channels;
+    int board, expansion, channels;
 };
 
 // In LevelTrims.h's row order.
 std::vector<Variant> Variants() {
-    std::vector<Variant> v { { 0, 0, 0, 4 }, { 0, 1, 0, 4 }, { 1, Console::kFrontLoader, 0, 4 }, { 1, Console::kPal, 0, 4 } };
+    std::vector<Variant> v { { 0, 0, 4 } };
     for (int cart : { Console::kNone, Console::kVrc6, Console::kMmc5, Console::kFds, Console::k5B })
-        v.push_back({ 1, Console::kFamicom, cart, 4 });
+        v.push_back({ 1, cart, 4 });
     for (int n = 1; n <= 8; ++n)
-        v.push_back({ 1, Console::kFamicom, Console::kN163, n });
+        v.push_back({ 1, Console::kN163, n });
     return v;
 }
 
 Controls ControlsFor(const Variant& v, int path, int part, int shape) {
     Controls c;
     c[kBoard] = v.board;
-    c[kRevision] = v.revision;
     c[kExpansion] = v.expansion;
     c[kExpansionChannels] = v.channels;
     c[kPath] = path;
@@ -219,7 +218,7 @@ int main(int argc, char** argv) {
                     table[static_cast<std::size_t>(at)] = static_cast<float>(trim * std::sqrt(reference / power));
                     if (report || (check && std::fabs(off) > kTolerance))
                         std::printf("board %d rev %d exp %d ch %d path %d part %d shape %d: %+.2f dB (trim %.6g)\n",
-                            v.board, v.revision, v.expansion, v.channels, path, part, shape, off, trim);
+                            v.board, m.Settings().revision, v.expansion, v.channels, path, part, shape, off, trim);
                 }
             }
     }

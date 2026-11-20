@@ -13,6 +13,8 @@
 // quantisation, out-of-tune top notes and stepped vibrato are what is heard.
 // The envelope's times are in milliseconds and move the volume a fraction
 // of a step each frame; the chip is written the whole step it reaches.
+// Fake keeps that oscillator running and applies a per-note, sample-rate
+// envelope in the board mixer, before the analog output stage.
 //
 // Oversampling renders the machines at 2, 4 or 8 times the host rate and
 // decimates them back (Render/Decimator.h); Double gives a second set of
@@ -71,6 +73,9 @@ public:
     // The host's master tuning, -100 .. 100 cents, on every note, held ones
     // too; no MIDI message carries it.
     void SetTune(double cents);
+    // Host tempo and quarter-note position of the next sample. A stopped
+    // transport still supplies the tempo for auditioning notes.
+    void SetTransport(double bpm, double quarterNotePosition, bool playing);
     void ReleaseAll();             // every key up, the pedal up
     void Panic();                  // every channel silent at once
     // A host's audio reset: every key and the pedal up, and every machine,
@@ -139,11 +144,13 @@ private:
     void FollowHeld();
     int StartNote(int key, int velocity, bool maySteal = true);
     void Retarget(int key, int velocity, bool glide);
-    void Restart(Slot& n) const noexcept;
+    void Restart(Slot& n) noexcept;
     void ReleaseSlot(int slot);
     void End(int slot);
     void Settle(Slot& n) const noexcept;
     void StepEnvelope(Slot& n) const noexcept;
+    void AdvanceSoftwareEnvelopes();
+    void SetSoftwareGain(int slot);
     [[nodiscard]] double Pitch(const Slot& n, double cents = 0.0) const;
     // Cents each set plays off the note: the first set down, the Double set up.
     [[nodiscard]] double Spread() const noexcept { return double_ ? detune_ / 2.0 : 0.0; }
@@ -151,7 +158,11 @@ private:
     bool Compose(int slot, ChannelSettings& s, double cents = 0.0) const;
     void Send(int slot, const ChannelSettings& s, bool start);
     void Write(int slot);
-    void Tick();
+    void Tick(std::int64_t cycle);
+    void PlayArpKey(const Key& next);
+    int FramesUntilArpStep(int frames);
+    [[nodiscard]] double BeatAt(double frameOffset = 0.0) const noexcept;
+    void AlignArpGrid() noexcept;
     [[nodiscard]] const Key& NextArpKey(int after) const noexcept;
     [[nodiscard]] int HeldIndex(int key) const noexcept;
 
@@ -166,10 +177,12 @@ private:
     Controls controls_;
     int boards_ = 2;
     Path path_ = Path::Line;
-    int part_ = 0, shape_ = 0, level_ = 0, sustain_ = 0;
+    int part_ = 0, shape_ = 0, level_ = 0;
+    double sustain_ = 0.0;
+    bool fakeEnvelope_ = false, movingEnvelope_ = false;
     int transpose_ = 0, mod_ = 0;
     double fine_ = 0.0;
-    double attack_ = 0.0, decay_ = 0.0, release_ = 0.0;   // in frames
+    double attack_ = 0.0, decay_ = 0.0, release_ = 0.0;   // in video frames (Real) or samples (Fake)
     double trim_ = 1.0;                 // LevelTrims.h, for the part and shape
     // One native Rack quantum at the host rate. Count internal samples so
     // automation remains continuous through smaller or split render blocks.
@@ -179,6 +192,11 @@ private:
     double frameHz_ = 60.0, vibratoStep_ = 0.0;
     int vibratoDelay_ = 0, glideFrames_ = 0;
     int arpKey_ = 0, arpCount_ = 0;
+    bool tempoSync_ = false, transportPlaying_ = false;
+    double bpm_ = 120.0, beatsPerSample_ = 2.0 / 48000.0;
+    double anchorBeat_ = 0.0;
+    std::int64_t framesFromAnchor_ = 0;
+    double arpStepsPerBeat_ = 4.0, lfoCyclesPerBeat_ = 3.0, nextArpStep_ = 1.0;
     std::int64_t tickNum_ = 0, periodNum_ = 1, periodDen_ = 1;
 
     int rate_ = 48000;

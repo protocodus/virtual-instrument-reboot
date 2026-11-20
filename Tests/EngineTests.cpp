@@ -624,7 +624,7 @@ void TestHeldPitchRecovery() {
 void TestInactiveMachineControls() {
     for (int setup : { 0, 1, 2 }) {
         Controls original = Plain(setup == 0 ? 0 : 1);
-        original[kRevision] = setup == 1 ? Console::kFrontLoader : 1;
+        original[kRevision] = setup; // Exercise all three legacy patch values.
         original[kExpansion] = setup == 2 ? Console::kFds : Console::kNone;
         original[kAttack] = 350;
         const auto reference = Fresh(original), changed = Fresh(original);
@@ -632,11 +632,12 @@ void TestInactiveMachineControls() {
         Play(*changed, { On(0, 69) }, 16000);
         Controls next = original;
         next[kExpansionChannels] = 8;
-        if (setup != 2)
-            next[kExpansion] = Console::kN163; // Neither machine has an active cartridge slot.
         if (setup == 0)
-            next[kRevision] = 2; // Both settings select the same physical Handheld revision.
+            next[kExpansion] = Console::kN163; // Cartridge controls are inactive on Handheld.
+        next[kRevision] = (setup + 1) % 3;
         changed->SetControls(next);
+        const int expected = setup == 0 ? static_cast<int>(Handheld::kColor) : static_cast<int>(Console::kFamicom);
+        Check(changed->MachineAt(0).Settings().revision == expected, "legacy revision selected inactive hardware");
         const Audio a = Play(*reference, {}, 16000);
         const Audio b = Play(*changed, {}, 16000);
         Check(a.left == b.left && a.right == b.right, "inactive machine settings restarted setup " + std::to_string(setup));
@@ -674,6 +675,104 @@ void TestArpChordEdits() {
         Check(std::fabs(Cents(hz, 392.0)) < 6.0,
               "Arp: changed chord after E4 landed at " + std::to_string(hz) + " Hz instead of G4");
     }
+}
+
+// A tempo-locked arp must make the same chip writes as a player sending
+// legato notes on the grid, even between two video frames.
+void TestTempoGrid() {
+    constexpr double rate = 44100.0;
+    constexpr double bpm = 137.0;
+    constexpr double beatsPerStep[] = { 0.125, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0, 2.0, 4.0 };
+    for (int division = 0; division < 8; ++division) {
+        Controls arp = Plain(division % 2);
+        arp[kMode] = 2;
+        arp[kTempoSync] = 1;
+        arp[kArpRate] = division + 1;
+        Controls manual = arp;
+        manual[kMode] = 1;
+        manual[kTempoSync] = 0;
+        const auto e = Fresh(arp, rate, 2);
+        const double step = beatsPerStep[division];
+        const double start = step * 0.375;
+        e->SetTransport(bpm, start, true);
+        const int first = static_cast<int>(std::ceil((step - start) * rate * 60.0 / bpm));
+        const int second = static_cast<int>(std::ceil((2 * step - start) * rate * 60.0 / bpm));
+        const auto synced = Play(*e, { On(0, 60), On(0, 67) }, second + 500, 37);
+        const auto direct = Play(*Fresh(manual, rate, 2),
+                                 { On(0, 60), On(first, 67), Off(first, 60),
+                                   On(second, 60), Off(second, 67) }, second + 500, 113);
+        Check(synced.left == direct.left && synced.right == direct.right,
+              "tempo arp differs from sample-timed notes at division " + std::to_string(division + 1));
+    }
+
+    Controls c = Plain(0);
+    c[kMode] = 2;
+    c[kTempoSync] = 1;
+    c[kArpRate] = 4; // eighth notes
+    const auto arp = Fresh(c);
+    arp->SetTransport(120, 0.25, true);
+    Play(*arp, { On(0, 57), On(0, 69) }, 12000); // A4 at beat 0.5, then tempo changes at 0.75
+    arp->SetTransport(60, 0.75, true);
+    const Audio changed = Play(*arp, {}, 24000);
+    Check(std::fabs(Cents(Measure(changed.left, 440, 48000, 2500, 10000), 440)) < 6
+          && std::fabs(Cents(Measure(changed.left, 220, 48000, 15000, 22000), 220)) < 6,
+          "tempo change must preserve the fractional eighth and lengthen its remaining duration");
+    arp->SetTransport(120, 0.25, true);  // loop/seek: A3 until beat 0.5
+    const Audio loop = Play(*arp, {}, 13000);
+    Check(std::fabs(Cents(Measure(loop.left, 220, 48000, 1100, 5500), 220)) < 6
+          && std::fabs(Cents(Measure(loop.left, 440, 48000, 8500, 12000), 440)) < 6,
+          "held arpeggio did not follow a backward transport jump");
+
+    // A stopped host keeps publishing the stationary playhead while notes
+    // may still be played. The local clock starts with the first held key.
+    const auto stopped = Fresh(c);
+    stopped->SetTransport(60, 8, false);
+    Play(*stopped, {}, 1234);
+    stopped->NoteOn(57, 100);
+    stopped->NoteOn(69, 100);
+    Play(*stopped, {}, 23000);
+    stopped->SetTransport(60, 8, false);
+    const Audio audition = Play(*stopped, {}, 9000);
+    Check(std::fabs(Cents(Measure(audition.left, 440, 48000, 3500, 8000), 440)) < 6,
+          "stopped transport never advanced the synced arp");
+}
+
+// Transport-relative LFO phase is shared by notes starting at different
+// points in a song. The hardware still receives its quantised frame writes.
+void TestTempoLfo() {
+    Controls c = Plain(0);
+    c[kTempoSync] = 1;
+    c[kVibratoDepth] = 100;
+    c[kVibratoRate] = FromNormalized(kVibratoRate, 2.0 / 7.0); // one cycle per quarter
+    const auto e = Fresh(c);
+    e->SetTransport(60, 0.2, true);
+    const Audio high = Play(*e, { On(0, 69) }, 6500);
+    e->SetTransport(60, 0.7, true);
+    const Audio low = Play(*e, {}, 6500);
+    Check(Cents(Measure(high.left, 460.0, 48000, 2300, 5800), 440.0) > 80
+          && Cents(Measure(low.left, 415.0, 48000, 2300, 5800), 440.0) < -80,
+          "synced LFO failed to track the quarter-note phase across a transport seek");
+    // Each of the eight LFO detents must give the same one-Hz movement
+    // when its tempo is scaled by its marked number of quarter notes.
+    constexpr double lengths[] = { 0.125, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0, 2.0, 4.0 };
+    const auto reference = Fresh(c, 44100, 2);
+    reference->SetTransport(60, 0.125, true);
+    const Audio cycle = Play(*reference, { On(0, 69) }, 44100, 64);
+    for (int index = 0; index < 8; ++index) {
+        c[kVibratoRate] = FromNormalized(kVibratoRate, (7 - index) / 7.0);
+        const auto voice = Fresh(c, 44100, 2);
+        voice->SetTransport(60 * lengths[index], 0.125 * lengths[index], true);
+        const Audio scaled = Play(*voice, { On(0, 69) }, 44100, 113);
+        Check(scaled.left == cycle.left && scaled.right == cycle.right,
+              "LFO division " + std::to_string(index) + " gives the wrong cycle length");
+    }
+    c[kTempoSync] = 0;
+    const auto free = Fresh(c);
+    free->SetTransport(237, 20.3, true);
+    const auto phrase = Phrase();
+    const Audio a = Play(*free, phrase, 68000, 37);
+    const Audio b = Play(*Fresh(c), phrase, 68000, 256);
+    Check(a.left == b.left && a.right == b.right, "free LFO or arp responds to transport");
 }
 
 void TestModes() {
@@ -886,6 +985,106 @@ void TestEnvelope() {
                       + ", " + std::to_string(late / reference) + ")");
         }
     }
+}
+
+void TestSoftwareEnvelope() {
+    // Same native oscillator, independently scaled at any noninteger sustain.
+    // Include the inverted cartridge outputs and the N163 multiplex.
+    struct PartProbe { int board, cart, part; };
+    for (const PartProbe p : { PartProbe{0, 0, 0}, {0, 0, 1}, {0, 0, 2},
+                               {1, 0, 0}, {1, 0, 1}, {1, 0, 2}, {1, 1, 3}, {1, 1, 4},
+                               {1, 2, 3}, {1, 3, 3}, {1, 4, 3}, {1, 5, 3} }) {
+        Controls c = Plain(p.board, p.part);
+        c[kBoards] = 1;
+        c[kRevision] = 1;
+        c[kExpansion] = p.cart;
+        c[kExpansionChannels] = 3;
+        c[kFakeEnvelope] = 1;
+        c[kVelocity] = 1;
+        c[kVolume] = -12;
+        const auto rms = [&](double sustain, int velocity) {
+            c[kSustain] = sustain;
+            const Audio a = Play(*Fresh(c), { On(0, 69, velocity) }, 12000);
+            return AcRms(a.left, 6000, 12000);
+        };
+        const double full = rms(15, 127), quiet = rms(5.125, 86);
+        const std::string part = std::to_string(p.board) + "/" + std::to_string(p.cart) + "/" + std::to_string(p.part);
+        Check(full > 0.0001 && std::fabs(quiet / full - (5.125 / 15.0) * (86.0 / 127.0)) < 0.002,
+              "software sustain and velocity independently scale the native part " + part);
+    }
+
+    Controls c = Plain(1, 1);
+    c[kFakeEnvelope] = 1;
+    c[kDouble] = 1;
+    c[kDetune] = 9;
+    c[kAttack] = 8;   // less than one NTSC video frame
+    c[kDecay] = 80;
+    c[kSustain] = 6.25;
+    c[kRelease] = 100;
+    c[kVolume] = -12;
+    const std::vector<Event> events = { On(0, 81), Off(7200, 81) };
+    const auto e = Fresh(c, 48000, 2);
+    const Audio a = Play(*e, events, 15000);
+    const Audio split = Play(*Fresh(c, 48000, 2), events, 15000, 19);
+    Check(a.left == split.left && a.right == split.right, "software envelope depends on host block size");
+    Check(a.left != a.right && e->Sounding() == 0, "software envelope in Double loses detune or retains a released note");
+    const int latency = e->LatencySamples();
+    for (const auto* side : { &a.left, &a.right }) {
+        const auto level = [&](int from, int to) { return AcRms(*side, latency + from, latency + to); };
+        const double peak = level(385, 710), sustain = level(6000, 7100);
+        Check(level(50, 160) < 0.55 * peak && peak > 2.0 * sustain,
+              "software triangle attack or decay misses its subframe peak");
+        Check(std::fabs(level(9200, 10000) / sustain - 0.50) < 0.045 && level(13000, 14500) < sustain * 0.003,
+              "software triangle release midpoint/residual: " + std::to_string(level(9200, 10000) / sustain) + "/" + std::to_string(level(13000, 14500) / sustain));
+    }
+
+    // A triangle's hardware has no volume steps. A live change of the
+    // envelope mode and fractional sustain must keep its pitch and phase.
+    c = Plain(1, 1);
+    c[kSustain] = 6.0;
+    c[kVolume] = -12;
+    auto held = Fresh(c);
+    const double native = AcRms(Play(*held, { On(0, 69) }, 12000).left, 6000, 12000);
+    c[kFakeEnvelope] = 1;
+    held->SetControls(c);
+    const double fake = AcRms(Play(*held, {}, 12000).left, 6000, 12000);
+    c[kSustain] = 6.125;
+    held->SetControls(c);
+    const double fraction = AcRms(Play(*held, {}, 12000).left, 6000, 12000);
+    c[kFakeEnvelope] = 0;
+    held->SetControls(c);
+    const double restored = AcRms(Play(*held, {}, 12000).left, 6000, 12000);
+    Check(std::fabs(fake / native - 0.4) < 0.005 && std::fabs(fraction / fake - 6.125 / 6.0) < 0.004
+          && std::fabs(restored / native - 1.0) < 0.01 && held->Sounding() == 1,
+          "held triangle does not follow live envelope mode and fine sustain changes");
+
+    // Pulse 1 and 2 have the same duty/period. Swapping only the first
+    // note's velocity subtracts the same first note, even as the second
+    // strikes, attacks and holds on the same machine.
+    c = Plain(0);
+    c[kBoards] = 1;
+    c[kVolume] = -12;
+    c[kFakeEnvelope] = 1;
+    c[kAttack] = 25;
+    c[kRelease] = 75;
+    c[kVelocity] = 1;
+    const auto phrase = [&](bool chord, int velocity) {
+        std::vector<Event> notes { On(0, 64, velocity) };
+        if (chord)
+            notes.push_back(On(2400, 72, 110));
+        notes.push_back(Off(4200, 64));
+        return Play(*Fresh(c), notes, 10000);
+    };
+    const Audio a1 = phrase(false, 40), a2 = phrase(false, 110);
+    const Audio b1 = phrase(true, 40), b2 = phrase(true, 110);
+    double difference = 0.0, signal = 0.0;
+    for (std::size_t i = 2500; i < 7800; ++i) {
+        const double solo = a2.left[i] - a1.left[i];
+        const double error = b2.left[i] - b1.left[i] - solo;
+        difference += error * error;
+        signal += solo * solo;
+    }
+    Check(signal > 0 && difference < signal * 0.0001, "another key changes the first key's software envelope");
 }
 
 // A held note takes a new wave: the handheld's wave channel, which starts
@@ -1141,9 +1340,12 @@ int main() {
     TestHeldPitchRecovery();
     TestArpRange();
     TestArpChordEdits();
+    TestTempoGrid();
+    TestTempoLfo();
     TestPedalAndPanic();
     TestReset();
     TestEnvelope();
+    TestSoftwareEnvelope();
     TestHeldWaves();
     TestTouch();
     TestBounds();
