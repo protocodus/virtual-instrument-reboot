@@ -354,7 +354,8 @@ void Engine::Strike(Key& note) {
 }
 
 // A note that was unplayable at onset has no hardware slot yet. Retry it
-// on a pitch change, just as active slots get their new periods on this frame.
+// on a pitch change or when a channel becomes free. A recovering Poly key
+// may take a free channel, but a wheel movement must not steal a sounding key.
 // A stolen Poly note already had its onset and must not be resurrected.
 void Engine::RetryHeldPitches() {
     retryPitch_ = false;
@@ -362,7 +363,7 @@ void Engine::RetryHeldPitches() {
         for (int i = 0; i < heldCount_; ++i) {
             Key& k = held_[i];
             if (k.waitingForPitch)
-                k.waitingForPitch = StartNote(k.key, k.velocity) < 0;
+                k.waitingForPitch = StartNote(k.key, k.velocity, false) < 0;
         }
     } else if (mono_ < 0 && heldCount_ > 0) {
         const int index = mode_ == 1 ? heldCount_ - 1 : HeldIndex(arpKey_);
@@ -409,7 +410,7 @@ void Engine::FollowHeld() {
 // Starts `key` on a channel of the part, or of its fallback when the part
 // cannot reach it: a free channel, the one freed longest ago, else the
 // oldest released note's, else the oldest note's. Returns the slot or -1.
-int Engine::StartNote(int key, int velocity) {
+int Engine::StartNote(int key, int velocity, bool maySteal) {
     const Machine& m = machines_[0];
     Part part = m.PartOf(part_);
     if (part.count == 0)
@@ -437,7 +438,7 @@ int Engine::StartNote(int key, int velocity) {
             if (rank < bestRank || (rank == bestRank && n.age < bestAge))
                 best = s, bestRank = rank, bestAge = n.age;
         }
-    if (best < 0)
+    if (best < 0 || (!maySteal && bestRank != 0))
         return -1;
 
     End(best);
@@ -498,6 +499,8 @@ void Engine::End(int slot) {
         mono_ = -1;
     n.busy = false, n.gate = false, n.started = false;
     n.age = ++age_;
+    if (mode_ == 0)
+        retryPitch_ = true;
 }
 
 // The envelope's moves that take no frame. A stage shorter than a frame

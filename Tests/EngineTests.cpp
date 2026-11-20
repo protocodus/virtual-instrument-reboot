@@ -589,6 +589,27 @@ void TestHeldPitchRecovery() {
             }
         }
     }
+    // A0 starts below the triangle's reach. When a bend brings it back,
+    // its pending onset must wait for the only channel, already playing A2.
+    Controls triangle = Plain(1, 1);
+    triangle[kBoards] = 1;
+    triangle[kBendRange] = 12;
+    triangle[kRelease] = 0;
+    for (bool liftOlder : { false, true }) {
+        const auto e = Fresh(triangle);
+        e->SetBend(-1);
+        Play(*e, { On(0, 21), On(1200, 45) }, 9600);
+        e->SetBend(0);
+        const Audio recent = Play(*e, {}, 24000);
+        Check(std::fabs(Cents(Measure(recent.left, 110.0, 48000, 6000, 24000), 110.0)) < 8.0,
+              "pending A0 stole the held A2 on pitch recovery");
+        const int released = liftOlder ? 21 : 45;
+        const double remaining = liftOlder ? 110.0 : 27.5;
+        const Audio held = Play(*e, { Off(0, released) }, 48000);
+        Check(std::fabs(Cents(Measure(held.left, remaining, 48000, 12000, 48000), remaining)) < 8.0,
+              "releasing one key lost the other during pending pitch recovery");
+    }
+
     Controls wave = Plain(0, 1);
     wave[kBoards] = 1;
     wave[kRelease] = 0;

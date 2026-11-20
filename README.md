@@ -52,7 +52,7 @@ WAVs are rendered and committed by hand after a change that alters them.
 
 Releasing the sustain pedal in Mono keeps the tail on the last sounding pitch. In Poly, a pitch bend can carry a held note across the selected channel’s range onto an available fallback. Editing a chord during an arpeggio advances from the last sounding pitch. Cartridge settings can be saved on an inactive board without restarting a held note.
 
-Mono passages share the oversampling filters once both channels have the same history. The band-limited step renderer processes only pending filter tails. Disk master-volume writes reach the output filter at the same sample across different callback sizes.
+Mono passages share the oversampling filters once both channels have the same history. The band-limited step renderer processes only pending filter tails. Disk master-volume writes reach the output filter at the same sample across different callback sizes. [Playback tests and CPU measurements](Docs/validation/0.5.2.md)
 
 ### 0.5.1 — 2026-11-19 — pulse attacks, bass glides and output switching
 

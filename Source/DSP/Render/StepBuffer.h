@@ -74,6 +74,8 @@ public:
         Advance(count);
     }
 
+    [[nodiscard]] bool HasPendingSteps() const noexcept { return pending_ > 0; }
+
     // Writes each sample's band-limited step increment (without integrating into
     // sum_) and advances the kernel tail, for feeding leaky/RC residual decays
     // without unbounded accumulator growth.

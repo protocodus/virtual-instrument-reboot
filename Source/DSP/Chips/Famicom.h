@@ -519,6 +519,22 @@ public:
             now_ = to;
             return;
         }
+        // With both gains set directly, their dividers keep time but never
+        // change a gain. A running modulator also holds this unit live.
+        if (ModulatorRunning() && (volumeEnvelope_.reg & modEnvelope_.reg & 0x80)) {
+            for (; tickDue_ < to; tickDue_ += kTick) {
+                now_ = tickDue_;
+                Tick();
+                if (UpdateDac())
+                    sink(now_);
+            }
+            if (EnvelopesRun()) {
+                volumeEnvelope_.timer.CatchUp(to);
+                modEnvelope_.timer.CatchUp(to);
+            }
+            now_ = to;
+            return;
+        }
         for (;;) {
             std::int64_t next = Earliest(to, tickDue_);
             if (EnvelopesRun()) {
@@ -749,6 +765,10 @@ private:
         if (live && !live_)
             CatchUp();
         live_ = live;
+        return UpdateDac();
+    }
+
+    bool UpdateDac() noexcept {
         int code = out_;
         if (!waveWrite_) {
             // Halted, the output holds the sample at $4040.

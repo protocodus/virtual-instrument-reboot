@@ -783,6 +783,10 @@ std::vector<Step<famicom::Fds>> FdsScript(bool lazy, std::int64_t heard) {
         c.Write(0x4086, 0x20, t);
     }));
     s.push_back(At<C>(heard + 150000, [](C& c, T& t) { c.Write(0x4080, 0x05, t); }));   // decay
+    // Resume direct gain on a non-tick boundary, then move the mod envelope
+    // under timer control. Both transitions must preserve the DAC event cycles.
+    s.push_back(At<C>(heard + 240007, [](C& c, T& t) { c.Write(0x4080, 0x98, t); }));
+    s.push_back(At<C>(heard + 310013, [](C& c, T& t) { c.Write(0x4084, 0x43, t); }));
     s.push_back(At<C>(heard + 350000, [](C& c, T& t) { c.Write(0x4089, 0x02, t); }));
     return s;
 }

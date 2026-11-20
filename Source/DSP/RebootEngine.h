@@ -137,7 +137,7 @@ private:
     void Lift(int key);
     void ReleaseKey(int key);
     void FollowHeld();
-    int StartNote(int key, int velocity);
+    int StartNote(int key, int velocity, bool maySteal = true);
     void Retarget(int key, int velocity, bool glide);
     void Restart(Slot& n) const noexcept;
     void ReleaseSlot(int slot);

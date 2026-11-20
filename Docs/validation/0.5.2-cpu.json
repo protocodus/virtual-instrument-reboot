@@ -1,0 +1,704 @@
+{
+  "baseline": "85985891f5f18bb52b1c42a9f6bce379a755588e",
+  "machine": "Apple M1 Max",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+  "method": "Native development timing: all eight factory MIDI demos followed by polyphonic sustain-pedal stress, 48 kHz, 64-frame callbacks; fresh -O3 -ffp-contract=off -fno-builtin compile. Median of 3 whole-suite per-callback means at each factor. For each of the 3 paired trials, order is baseline/control/final, final/control/baseline, baseline/control/final. Thread CPU uses CLOCK_THREAD_CPUTIME_ID; wall uses steady_clock. Setup, verification and file writes are outside measurements.",
+  "overall_versus_0_5_1": {
+    "1": {
+      "cpu_us": {
+        "before": 4.259867872355225,
+        "after": 2.87036080068546,
+        "reduction_pct": 32.61854858661438
+      },
+      "wall_us": {
+        "before": 18.78968430000885,
+        "after": 17.884649045478117,
+        "reduction_pct": 4.816660248678617
+      }
+    },
+    "2": {
+      "cpu_us": {
+        "before": 6.012848728939813,
+        "after": 4.052653578960681,
+        "reduction_pct": 32.60010750885387
+      },
+      "wall_us": {
+        "before": 28.96740005809968,
+        "after": 22.23904141957228,
+        "reduction_pct": 23.22734738027018
+      }
+    },
+    "4": {
+      "cpu_us": {
+        "before": 10.248463972101023,
+        "after": 6.521934489092081,
+        "reduction_pct": 36.361834252952654
+      },
+      "wall_us": {
+        "before": 47.008003090361825,
+        "after": 39.431571588635535,
+        "reduction_pct": 16.11732259113918
+      }
+    },
+    "8": {
+      "cpu_us": {
+        "before": 18.71986729859241,
+        "after": 11.953662333940384,
+        "reduction_pct": 36.144513509242614
+      },
+      "wall_us": {
+        "before": 84.57797006198228,
+        "after": 68.1236868657662,
+        "reduction_pct": 19.45457331756448
+      }
+    },
+    "all": {
+      "cpu_us": {
+        "before": 9.784420512400247,
+        "after": 6.3806078464639375,
+        "reduction_pct": 34.788086444388824
+      },
+      "wall_us": {
+        "before": 44.87846069477114,
+        "after": 37.595078139694074,
+        "reduction_pct": 16.229127386104103
+      }
+    }
+  },
+  "isolated_render_optimizations": {
+    "1": {
+      "cpu_us": {
+        "before": 3.9754524315488613,
+        "after": 2.87036080068546,
+        "reduction_pct": 27.797883382869472
+      },
+      "wall_us": {
+        "before": 18.09778286102364,
+        "after": 17.884649045478117,
+        "reduction_pct": 1.1776791509889195
+      }
+    },
+    "2": {
+      "cpu_us": {
+        "before": 5.868338193395808,
+        "after": 4.052653578960681,
+        "reduction_pct": 30.94035405932276
+      },
+      "wall_us": {
+        "before": 32.68370661988593,
+        "after": 22.23904141957228,
+        "reduction_pct": 31.956795236800783
+      }
+    },
+    "4": {
+      "cpu_us": {
+        "before": 9.914113697853827,
+        "after": 6.521934489092081,
+        "reduction_pct": 34.21565771931859
+      },
+      "wall_us": {
+        "before": 57.277153090930945,
+        "after": 39.431571588635535,
+        "reduction_pct": 31.15654417035091
+      }
+    },
+    "8": {
+      "cpu_us": {
+        "before": 18.35392670484754,
+        "after": 11.953662333940384,
+        "reduction_pct": 34.87136280879205
+      },
+      "wall_us": {
+        "before": 89.07106375554882,
+        "after": 68.1236868657662,
+        "reduction_pct": 23.51760044908824
+      }
+    },
+    "all": {
+      "cpu_us": {
+        "before": 9.57422978682766,
+        "after": 6.3806078464639375,
+        "reduction_pct": 33.356437138761244
+      },
+      "wall_us": {
+        "before": 50.19696100430625,
+        "after": 37.595078139694074,
+        "reduction_pct": 25.104872112738263
+      }
+    }
+  },
+  "audio_reference": "control-final has exactly the candidate sound and event fixes, including CH3/mono, trim automation and FDS timing, but uses the original independent FIR chains, BLEP convolution/tail handling and both per-sample DAC residual calculations. Timestamped MIDI, controls, preparation, compiler, flags, seeds and rendering frontend are identical. Each raw stereo float32 file is verified by SHA-256.",
+  "pcm": [
+    {
+      "render": "01-square-lead-48000-64-1.f32",
+      "bytes": 5157816,
+      "sha256": "2d109dde08105fa0bf0651fd68314b41026ace224e0194a0c5ca35b06973eceb",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "01-square-lead-48000-64-2.f32",
+      "bytes": 5157816,
+      "sha256": "c47b5702edb9b003ca1fbbd3796e23ba91dae0c9ff8c9baef2e4ce24da7245ab",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "01-square-lead-48000-64-4.f32",
+      "bytes": 5157816,
+      "sha256": "53ae4384601742287563b7680b5d757ca2123af4bb5f641a08a1cca1b2602d59",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "01-square-lead-48000-64-8.f32",
+      "bytes": 5157816,
+      "sha256": "2ed7af340e79f6d9716f66992148e8948a1eaeb4aed851d59e454b7089021610",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "02-wave-bass-48000-64-1.f32",
+      "bytes": 4680960,
+      "sha256": "509a044f0803333388b2c82f89bcfd6989859e628dbbb4191d5ab9ee510c5afb",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "02-wave-bass-48000-64-2.f32",
+      "bytes": 4680960,
+      "sha256": "d897fb8ae1edcdc9cc15aa7eac5a34c0cb7985042f039c75d4270bdfd99aa371",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "02-wave-bass-48000-64-4.f32",
+      "bytes": 4680960,
+      "sha256": "af07b740c206bbf63d843a3cf5bd8492185365e87f23360b9314e1fab8c33e99",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "02-wave-bass-48000-64-8.f32",
+      "bytes": 4680960,
+      "sha256": "f05b2686052a6cf274b7759e44825cd887ee4c5884a2a164832b283eed341fe1",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-48000-64-1.f32",
+      "bytes": 5452800,
+      "sha256": "d0080f20fb81e99738e582581917214dd417bbeff442f62679a2b99afd070b53",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-48000-64-2.f32",
+      "bytes": 5452800,
+      "sha256": "f38994457506a8a38573bda4cc205eed9fca3203f13afc946e823cce28692386",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-48000-64-4.f32",
+      "bytes": 5452800,
+      "sha256": "216f017e26320f9123d3d1a03a36099ef4061fd0e2ebebdec92b396b0ec5abeb",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-48000-64-8.f32",
+      "bytes": 5452800,
+      "sha256": "5fda82f2118d62f0c51448ef24464f03bdaf8d717bf5f174e396c32720244118",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "04-static-snare-48000-64-1.f32",
+      "bytes": 5577928,
+      "sha256": "2b3c1071460073479730992c74cbd1fd93135cda0c92294008ac8b208c294ab1",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "04-static-snare-48000-64-2.f32",
+      "bytes": 5577928,
+      "sha256": "4353890e0b042f294c9bad2abd692cf2a5d3e3fc2d2ee4fd574d5d97f98177a6",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "04-static-snare-48000-64-4.f32",
+      "bytes": 5577928,
+      "sha256": "be3ed99c29a1bcde23171c29c2a2698eaf6ea30f47987f1d1920cc2cacc82ad1",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "04-static-snare-48000-64-8.f32",
+      "bytes": 5577928,
+      "sha256": "8c1b2ddc9c4ecb6ea54f45e54cf35ec49a9e0eb2900e17cd2aaaa802d447c563",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "05-triangle-bass-48000-64-1.f32",
+      "bytes": 4646400,
+      "sha256": "610b3567b9da61ad270c96edcf24299de5f8fb7fcb2d41115a341c216fa44587",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "05-triangle-bass-48000-64-2.f32",
+      "bytes": 4646400,
+      "sha256": "12d89308121ebbb530f5aed44d3375818c09c0c1853a85cf5a7a0a9d7c0b049e",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "05-triangle-bass-48000-64-4.f32",
+      "bytes": 4646400,
+      "sha256": "5486b1b285f4f001f64768cf7ff4a89f91ffa5493fbcff9632ddd92b99bd8431",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "05-triangle-bass-48000-64-8.f32",
+      "bytes": 4646400,
+      "sha256": "6aa1ef89d8a61896ecac3c91bb63454534b8afbbba4fa1276c428da1e9014c1d",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "06-pulse-glide-48000-64-1.f32",
+      "bytes": 4911360,
+      "sha256": "dffece62251954e4ac4e4b2f90204e04b59e51b790eb2b50ea7e9ccd2736440e",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "06-pulse-glide-48000-64-2.f32",
+      "bytes": 4911360,
+      "sha256": "3d1077a9d46717057b57f0b074739115d6434cc6b88902527546d8e904392eba",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "06-pulse-glide-48000-64-4.f32",
+      "bytes": 4911360,
+      "sha256": "b9487c501fe08d47c964f067b986af44954a6800bca16989cc7f524aa81748f5",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "06-pulse-glide-48000-64-8.f32",
+      "bytes": 4911360,
+      "sha256": "c9f019e705190ce3943c29e6eb2662f5bf56a43e8460e81a339f2a11c9f50206",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "07-saw-lead-48000-64-1.f32",
+      "bytes": 4680000,
+      "sha256": "63c36b20f8c8c940046c8861f2fad88e678489f6f757fc122fc6d7f016d42041",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "07-saw-lead-48000-64-2.f32",
+      "bytes": 4680000,
+      "sha256": "6822390d9c99163aecd7edb3a652c2b193eb2486f1e7685094ff95117868cac4",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "07-saw-lead-48000-64-4.f32",
+      "bytes": 4680000,
+      "sha256": "fbaba552be999d297dc92d2e2dda344bf33f99b15da65cbd4b8c089cb1160de5",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "07-saw-lead-48000-64-8.f32",
+      "bytes": 4680000,
+      "sha256": "4518e5b57a6c76a955b2a48fb0b1711e410f7f5f9749b1bf3d1064199616304a",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "08-disk-organ-48000-64-1.f32",
+      "bytes": 5376000,
+      "sha256": "d492510fb8c3fc1f8fda4a182683b61b24b9e396ce174312e25cb3fb808cd9d3",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "08-disk-organ-48000-64-2.f32",
+      "bytes": 5376000,
+      "sha256": "59d5baece6efffa3bb023a13caef0636019ab17f7d54fbb00dcb63b7c68d41ef",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "08-disk-organ-48000-64-4.f32",
+      "bytes": 5376000,
+      "sha256": "5ad229fb9bcb4c9bb43a513a416381763d35f24942dc1db5b6eea683ea2c6cd8",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "08-disk-organ-48000-64-8.f32",
+      "bytes": 5376000,
+      "sha256": "c8df844df6cb869c32519731569f1a5290eae5d7ea7de5c72e3c87b7c09537df",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "01-square-lead-44100-256-1.f32",
+      "bytes": 4738744,
+      "sha256": "13042950b9b865966f2874d568b0c20a548edccc3454bf92c0c8e3623b7c16cb",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "01-square-lead-44100-256-2.f32",
+      "bytes": 4738744,
+      "sha256": "8e15592cf8606d4e7a1d49e6541c7952f620089cc8b68dcb8fe6a5d6a12ba75e",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "01-square-lead-44100-256-4.f32",
+      "bytes": 4738744,
+      "sha256": "98e9d222338a61f175b733302d618aad12318a42d29276f0d492b54bd5ddef49",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "01-square-lead-44100-256-8.f32",
+      "bytes": 4738744,
+      "sha256": "631eef49a8d3895b41bbdd56541b6a4f92179ae71775a7c5b659beba2e04fb73",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "02-wave-bass-44100-256-1.f32",
+      "bytes": 4300632,
+      "sha256": "b319d938c55b4209db347b72adb99d74ae1b64646b02f71dc9aeb456defe0b66",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "02-wave-bass-44100-256-2.f32",
+      "bytes": 4300632,
+      "sha256": "c7ee9810da9eaf41c5949981e4f3bce398bd3bf3328b17ca18310864b03cf4a7",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "02-wave-bass-44100-256-4.f32",
+      "bytes": 4300632,
+      "sha256": "ae4493fc52dc80c57cf47f00e9c2c9699ad06e26ce0bcee4ceb883857de03ee5",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "02-wave-bass-44100-256-8.f32",
+      "bytes": 4300632,
+      "sha256": "3836d1ad00c83f3bf076a9a37afd8deea29c69ceac6e79827748685608b4f255",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-44100-256-1.f32",
+      "bytes": 5009760,
+      "sha256": "165e8e6284565bfa488a54fef3e661dbe56d9e0027ffbccc29c225c1f8ed8c05",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-44100-256-2.f32",
+      "bytes": 5009760,
+      "sha256": "15f9a98ac34121e649f7f6ee1812f2d297e6470878a9e6d9257489994fff2d16",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-44100-256-4.f32",
+      "bytes": 5009760,
+      "sha256": "0c75efb8d9615571249b5760e5b5444410e6e1a9f79e43ea6357b55907ae5ea3",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-44100-256-8.f32",
+      "bytes": 5009760,
+      "sha256": "9da81a7e4793392b529f86e8a968a60e24af51a8ccdbcec37c83472a3babf287",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "04-static-snare-44100-256-1.f32",
+      "bytes": 5124720,
+      "sha256": "5b1f77f3e6e50fa225ef626380d963b24ef8e8a8d122b6d0e1ccc28ca347078b",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "04-static-snare-44100-256-2.f32",
+      "bytes": 5124720,
+      "sha256": "94d975eee8c4c883ed68a1e8ae6c5198c433a151458f0b527308789476b4be5c",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "04-static-snare-44100-256-4.f32",
+      "bytes": 5124720,
+      "sha256": "1ac833389254c705116bef32ffeeda8a97c4261c04e20b8b7d0b38accf153bfb",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "04-static-snare-44100-256-8.f32",
+      "bytes": 5124720,
+      "sha256": "f7ec413abc912049ac84bacc21a061ad77a5769db5082820e867a28824a71523",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "05-triangle-bass-44100-256-1.f32",
+      "bytes": 4268880,
+      "sha256": "8b99dbca0632aa61b2dce20e4f324ae9702ce78bd4926c85cf84a258ea18c1d2",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "05-triangle-bass-44100-256-2.f32",
+      "bytes": 4268880,
+      "sha256": "89621efe5b22478ed3f532c09247f40153337e0fed474670a985938f04101a42",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "05-triangle-bass-44100-256-4.f32",
+      "bytes": 4268880,
+      "sha256": "fb998f5f34a27c169fb25c631817c7ff1843da320bf25763b89de11f2c95000d",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "05-triangle-bass-44100-256-8.f32",
+      "bytes": 4268880,
+      "sha256": "79915f9dbcd93b004e07d16d899fe3c2fe0ef7273813d8a6adb3a60f154d26c3",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "06-pulse-glide-44100-256-1.f32",
+      "bytes": 4512312,
+      "sha256": "9130f6f6eacc51c4c2d6d629a5221c4cc649ffe10482635672d4516466cc366c",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "06-pulse-glide-44100-256-2.f32",
+      "bytes": 4512312,
+      "sha256": "10550213723511ba1308b57dc928a8c888bb4dbf61ffa9603d95a671e2387e3e",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "06-pulse-glide-44100-256-4.f32",
+      "bytes": 4512312,
+      "sha256": "1ac211e53518e940a943333f0621cc37a9f56171e959e7c67428a14705f49646",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "06-pulse-glide-44100-256-8.f32",
+      "bytes": 4512312,
+      "sha256": "c4b7768b15eb90bb272ed217a878a2eb8fc38f1760f3bacc961212b2b1f1833a",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "07-saw-lead-44100-256-1.f32",
+      "bytes": 4299752,
+      "sha256": "8bff35c6663bde880849bb40fa54b0b336cd122f7a0f4da4af61106199c61b13",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "07-saw-lead-44100-256-2.f32",
+      "bytes": 4299752,
+      "sha256": "e907d6beef1394077b2d02ba54d1d12e12b93b67d4c8cc363ba6584a55e6f0a7",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "07-saw-lead-44100-256-4.f32",
+      "bytes": 4299752,
+      "sha256": "c77eb8bff9b456803130626c30651510f6b2647f5a1b27970a5fc6456000c15a",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "07-saw-lead-44100-256-8.f32",
+      "bytes": 4299752,
+      "sha256": "f5b93e3b971fad9c3cfa82c95210c792386dfde438c8bb3c5d519c278a16ed61",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "08-disk-organ-44100-256-1.f32",
+      "bytes": 4939200,
+      "sha256": "fd9ab53f5a096db552b7f27cf8efbecce4067a34f2862f20a6d9af3eb79ac6f9",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "08-disk-organ-44100-256-2.f32",
+      "bytes": 4939200,
+      "sha256": "a3157df353faebef6493654cd4e1e22e76adf577b873143fc80f0c7a306eafcd",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "08-disk-organ-44100-256-4.f32",
+      "bytes": 4939200,
+      "sha256": "0d55a757fedca63f45f5df91f7c5fc074474326103402c4cd42c59274c92da9f",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "08-disk-organ-44100-256-8.f32",
+      "bytes": 4939200,
+      "sha256": "fc0fc1f0acc8db8803cd5d74ffd93cb9df7debe50f013b9cd4714a8b8624ca3b",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "01-square-lead-96000-37-1.f32",
+      "bytes": 10315632,
+      "sha256": "a73bc5a7cb0bdb1857db4cc9c59bff5509d4bc9239a66e87d665ee1b2d093c62",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "01-square-lead-96000-37-2.f32",
+      "bytes": 10315632,
+      "sha256": "cb59fb45e5a693dbd241eef920ea2373c6b981199351051bb49a647ba18f17e2",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "01-square-lead-96000-37-4.f32",
+      "bytes": 10315632,
+      "sha256": "0a3d67260b48f06f3e4863c3af95ae687c148a87136bbfce850556c0e717fb91",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "02-wave-bass-96000-37-1.f32",
+      "bytes": 9361920,
+      "sha256": "e8f7bb9a4260a67c488afba157ca7e228ac81290c8de84c9854d51e703e32b32",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "02-wave-bass-96000-37-2.f32",
+      "bytes": 9361920,
+      "sha256": "9f263d7cc10f2a1205cbc9cb57e630018f8b3773720d4c6f4efd2314a2d5cee1",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "02-wave-bass-96000-37-4.f32",
+      "bytes": 9361920,
+      "sha256": "b629b9dfa17488244fe64c654dedef680168a0b07242eee018ca84617932c738",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-96000-37-1.f32",
+      "bytes": 10905600,
+      "sha256": "371e61c32ed08bc07af3334887c941a5c45306fa39b6df116b3a4ac9f6912ef5",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-96000-37-2.f32",
+      "bytes": 10905600,
+      "sha256": "f1fa53ec74042f33b3ab792c222355db429545f2d660b34182c9f610302cda50",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "03-pocket-arp-96000-37-4.f32",
+      "bytes": 10905600,
+      "sha256": "e28b826d3fab3918ddd8a52d0c7a8979b5b8cdfbaba18d12ff7880ddc63e3f5e",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "04-static-snare-96000-37-1.f32",
+      "bytes": 11155856,
+      "sha256": "1f098516506e8fc9a21feb7d4eaec8b3d3103b87dc75157a6db74a173e24e71e",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "04-static-snare-96000-37-2.f32",
+      "bytes": 11155856,
+      "sha256": "44471c7370adda8bfac251b7de04919a5e0249a06c79c21cdc5da75f8e03c481",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "04-static-snare-96000-37-4.f32",
+      "bytes": 11155856,
+      "sha256": "8ac37bd713d8ccd675eb11c421f6d9b39e856123ea2c2771c505e15b4c7bd0f5",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "05-triangle-bass-96000-37-1.f32",
+      "bytes": 9292800,
+      "sha256": "28929a11b2ce15b79cf40eb4fd358cdeaa645b621d643855a5c0673e57bfe0e8",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "05-triangle-bass-96000-37-2.f32",
+      "bytes": 9292800,
+      "sha256": "25d9e0c9ed333ed959e52d65cced79dea03439afd7a4ad664df45aa0b3d3185c",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "05-triangle-bass-96000-37-4.f32",
+      "bytes": 9292800,
+      "sha256": "041542d82aa92a0969a71422f8d014bf1542254b0904920b656e7ac2a8407212",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "06-pulse-glide-96000-37-1.f32",
+      "bytes": 9822720,
+      "sha256": "c465ccd8275da94652f901d022259ffbe08df8e4a448ee7c8cd35dbebf7d5059",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "06-pulse-glide-96000-37-2.f32",
+      "bytes": 9822720,
+      "sha256": "9d6827c01a4501bb5c3d90a1fd31e3df1e4c5a7285a90b90d8e1ba364f60b1d3",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "06-pulse-glide-96000-37-4.f32",
+      "bytes": 9822720,
+      "sha256": "ea5591b451693cfc332a77b7d8e12e335e7fae9ea236b6f042a0408207305fab",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "07-saw-lead-96000-37-1.f32",
+      "bytes": 9360000,
+      "sha256": "7f173bcb317d4937483e1f23ee42b3b13505f8e0ba3a18310a9ee955648f828f",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "07-saw-lead-96000-37-2.f32",
+      "bytes": 9360000,
+      "sha256": "cad161df78a805613856e2d9e7a3ea64a1cd37ab84b8acf4f3e6d07b413efc28",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "07-saw-lead-96000-37-4.f32",
+      "bytes": 9360000,
+      "sha256": "124aa4d946b5154574871ef54b86f6b25793de1d4299f6d2dadfe487a9dfab97",
+      "identical_to_prior_release": false
+    },
+    {
+      "render": "08-disk-organ-96000-37-1.f32",
+      "bytes": 10752000,
+      "sha256": "7a3cfff7ffd21521edc162972cffb388b37fddf8eeb1002165457dcbae989a53",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "08-disk-organ-96000-37-2.f32",
+      "bytes": 10752000,
+      "sha256": "7f3446fe5864fd5a1699efbc2c29ebdb13faf641198abcdcfc75de79814dc269",
+      "identical_to_prior_release": true
+    },
+    {
+      "render": "08-disk-organ-96000-37-4.f32",
+      "bytes": 10752000,
+      "sha256": "56977496986b6b5fd13b39ea5f430020d4d48cd2cb9d3a51edb8fee3a2bda2f0",
+      "identical_to_prior_release": true
+    }
+  ],
+  "prior_release_matches_by_rate": {
+    "48000": {
+      "identical": 24,
+      "total": 32
+    },
+    "44100": {
+      "identical": 15,
+      "total": 32
+    },
+    "96000": {
+      "identical": 9,
+      "total": 24
+    }
+  },
+  "source_file_sha256": {
+    "Source/DSP/Boards/Board.h": "5561ef29e421ec980aaeb4cdae901d6eaba68f15a95c04160d0cf0e87a59de4c",
+    "Source/DSP/Boards/Console.h": "2be99f12b438424ab8f13c0c42c3ad6a4d5714b72ce2e8b22356a38fb56de3dd",
+    "Source/DSP/Boards/Handheld.h": "aca754644e4b2c4d5d039133655f057fe0ebfd80a3b9ab4f7ab5ed3dd0b4fcd5",
+    "Source/DSP/Chips/Ay8910.h": "e695a15ca56db47ed5a836b6b8a87e9490f9e28f86028fc19065b3e89f1bcacc",
+    "Source/DSP/Chips/Famicom.h": "098c84dbf1d941878fbe75b14fd60e69cb6369356adb3df17b67e345951ee49b",
+    "Source/DSP/Chips/GameBoyApu.h": "f830576f86e6a8fddeb0fcdff49b9dc4b82432f8b35ec901deedd762a07921fe",
+    "Source/DSP/Chips/Lfsr.h": "0b0c0776418a430a1aa21d3e04edcaf548e7969bc8c9f44fa34836028f1f853b",
+    "Source/DSP/Chips/NesApu.h": "58b5f1c49a6c6813c3b8596e1ca6f0fab0265f8356ee3ebbf3c0a5a706b2224e",
+    "Source/DSP/Chips/Timer.h": "10aa539bd7dcd5c7a4caafcc9954d57b8591073d42becb0314dd02978251a91b",
+    "Source/DSP/Driver/ConsoleDriver.h": "29fbe6ebab5b7a48cb48797b3ab49b06277f575ec6039d8fa1d5ad10e7396250",
+    "Source/DSP/Driver/DriverTypes.h": "15b84966a7eab19892ba53b40f00573121f9c9152be8011ff1ca4a987cfa9b95",
+    "Source/DSP/Driver/HandheldDriver.h": "e6d8d693ac9bf07a3b81e9448bd74a93c2a3ec8ae59c9052aba5004df6462e45",
+    "Source/DSP/Driver/Machine.h": "e08d606121db5434eb2594119d82ab3f12660ba713c621b768f178d6a76ae782",
+    "Source/DSP/Driver/Waves.h": "aebb3cf81e504278d39d542f2e126bfd0f9fe67a06d74113971aca5ee38741c9",
+    "Source/DSP/LevelTrimData.h": "bc029d79c250476eafbfaecd7af281d06efb779321691ee53e1ff0fe8c4e90ca",
+    "Source/DSP/LevelTrims.h": "979f5269c4f5e6b7e98cd18c7cc1b8fed11ddaf79b5f4b33f2d21c60e9b0780a",
+    "Source/DSP/OutputStage.h": "7b3bce8d7d2005de25b41a59ca06436a449a0bcc648a18b571a5a75de53f794a",
+    "Source/DSP/RebootControls.h": "3119b4bf54ca9e055bb1e14d6d79a4b30227f6acb54f180db056aa5338b0c2c6",
+    "Source/DSP/RebootEngine.cpp": "7bbe276bba7286e790b6bb98109c3aae801e0f19af4a44b2f9fc39fbecffc915",
+    "Source/DSP/RebootEngine.h": "4d25b257503c2b815a7de9b951a831eb1d7f91ed3df6f322d57883f532280fda",
+    "Source/DSP/RebootPresets.h": "c631346ecaf5085161e8956dca08c41b11697e4045f6f44a5269a0d06fcb65b8",
+    "Source/DSP/Render/BlepKernel.h": "0beeee86c817b79e385e1f9180015e2094a9e987005bec88c23011f112c9940f",
+    "Source/DSP/Render/Decimator.h": "948d451d67cf0a8dc6f6629efa3433025ec3442014344ce64f2ed09baba41b31",
+    "Source/DSP/Render/Filters.h": "a3863181820eb9c66661c06be8630f93089d7e2081702c2666732ab06e242797",
+    "Source/DSP/Render/HalfbandKernel.h": "9a0fb983a970662275f698db6b2638558ca1435c2f37b63da2230238adc4d447",
+    "Source/DSP/Render/StepBuffer.h": "167c70086951ad1a1c04e5fd8cc166b924d96b23542b01bcdc11008965b7d465",
+    "Source/DSP/Render/Timebase.h": "9281aa426d6d7a9f9d003a4395a434f23a7e85b9d514411a59cc2859342fe467"
+  }
+}

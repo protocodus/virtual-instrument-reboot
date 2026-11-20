@@ -156,24 +156,18 @@ public:
     void Render(int frames, Path path, float* left, float* right) {
         RunTo(tb_.CycleAt(frames));
         float bus[2][StepBuffer::kMaxFrames] {};
-        float offDelta[2][StepBuffer::kMaxFrames] {};
         mix_.Read(0, bus[0], frames);
         mix_.Read(1, bus[1], frames);
-        dacOff_[0].ReadDelta(offDelta[0], frames);
-        dacOff_[1].ReadDelta(offDelta[1], frames);
-        float* out[2] = { left, right };
-        for (int i = 0; i < frames; ++i) {
-            for (int side = 0; side < 2; ++side) {
-                dacResidual_[side] = dacFadeFactor_ * (dacResidual_[side] + static_cast<double>(offDelta[side][i]));
-                if (dacResidual_[side] > -1.0e-15 && dacResidual_[side] < 1.0e-15)
-                    dacResidual_[side] = 0.0;
-                // The selector monitors one of two live taps. Both sets
-                // of capacitors stay charged as the board plays.
-                const double pin = pinBlocker_[side].Process(bus[side][i]);
-                const double in = static_cast<double>(bus[side][i]) + dacResidual_[side];
-                const double line = amplifier_[side].Process(capacitor_[side].Process(in));
-                out[side][i] += static_cast<float>(path == Path::Line ? line : pin);
-            }
+        // A DAC turn-off is the sole source of this separate RC tail.
+        // An empty impulse buffer and zero residual stay exactly at rest.
+        if (dacResidual_[0] != 0.0 || dacResidual_[1] != 0.0 ||
+            dacOff_[0].HasPendingSteps() || dacOff_[1].HasPendingSteps()) {
+            float offDelta[2][StepBuffer::kMaxFrames];
+            dacOff_[0].ReadDelta(offDelta[0], frames);
+            dacOff_[1].ReadDelta(offDelta[1], frames);
+            Filter(frames, path, bus, offDelta, left, right);
+        } else {
+            Filter(frames, path, bus, nullptr, left, right);
         }
         tb_.Advance(frames);
     }
@@ -182,6 +176,25 @@ public:
     [[nodiscard]] int Revision() const noexcept { return revision_; }
 
 private:
+    void Filter(int frames, Path path, const float (*bus)[StepBuffer::kMaxFrames],
+                const float (*offDelta)[StepBuffer::kMaxFrames], float* left, float* right) noexcept {
+        float* out[2] = { left, right };
+        for (int i = 0; i < frames; ++i) {
+            for (int side = 0; side < 2; ++side) {
+                double in = bus[side][i];
+                if (offDelta != nullptr) {
+                    dacResidual_[side] = dacFadeFactor_ * (dacResidual_[side] + static_cast<double>(offDelta[side][i]));
+                    if (dacResidual_[side] > -1.0e-15 && dacResidual_[side] < 1.0e-15)
+                        dacResidual_[side] = 0.0;
+                    in += dacResidual_[side];
+                }
+                const double pin = pinBlocker_[side].Process(bus[side][i]);
+                const double line = amplifier_[side].Process(capacitor_[side].Process(in));
+                out[side][i] += static_cast<float>(path == Path::Line ? line : pin);
+            }
+        }
+    }
+
     struct Sink {
         Handheld* board;
         void operator()(std::int64_t cycle) const { board->Changed(cycle); }

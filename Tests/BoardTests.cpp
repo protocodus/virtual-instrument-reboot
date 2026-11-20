@@ -740,6 +740,37 @@ void TestBlackboxBus() {
     }
 }
 
+void TestLongBoardInitialization() {
+    // Rack oversampling can put the machines at 384 kHz. The bus timeline
+    // then spans multiple render windows during a long setup sequence.
+    const auto settled = [](auto& board) {
+        std::array<float, 64> l {}, r {};
+        board.FinishBoot();
+        const bool aligned = board.Now() == board.CycleAt(0);
+        board.Render(64, Path::Pin, l.data(), r.data());
+        return aligned && std::all_of(l.begin(), l.end(), [](float x) { return x == 0.0f; })
+                       && std::all_of(r.begin(), r.end(), [](float x) { return x == 0.0f; });
+    };
+    Handheld handheld;
+    handheld.Prepare(384000);
+    handheld.Reset(Handheld::kOriginal);
+    handheld.Write(0xFF26, 0x80);
+    handheld.Write(0xFF25, 0x11);
+    handheld.Write(0xFF12, 0xF0);
+    for (int i = 0; i < 800; ++i)
+        handheld.Write(0xFF24, i % 2 == 0 ? 0x11 : 0x77);
+    Check(settled(handheld) && handheld.Read(0xFF24) == 0x77,
+          "long handheld boot must land its final mixer setting at rest");
+
+    Console console;
+    console.Prepare(384000);
+    console.Reset(Console::kFamicom, Console::kNone);
+    for (int i = 0; i < 800; ++i)
+        console.Write(0x4011, i % 2 == 0 ? 63 : 127);
+    Check(settled(console) && console.Apu().Out(nes::Apu::kDmc) == 127,
+          "long console boot must land its final DAC setting at rest");
+}
+
 // A disk driver can write $4089 several times in one output sample. Its
 // analog filter must see the same settings across any legal block partition.
 void TestDiskMasterWrites() {
@@ -785,6 +816,7 @@ int main() {
     TestMonitorPathSwitch(*machine);
     TestBlackboxBus();
     TestDiskMasterWrites();
+    TestLongBoardInitialization();
     if (failures == 0)
         std::printf("Reboot.Boards: all checks passed\n");
     return failures == 0 ? 0 : 1;
