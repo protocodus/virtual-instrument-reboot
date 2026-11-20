@@ -147,7 +147,14 @@ if(BUILD_TESTING)
     # The Rack's SDK refuses a global whose value is worked out when the
     # module loads. GCC folds library calls on constants and hides them, so
     # Clang is asked, with the SDK's -Wall -Wextra -Werror.
-    find_program(REBOOT_CLANGXX NAMES clang++)
+    # The Clang bundled with Visual Studio tracks the MSVC headers that it
+    # will parse. An independent LLVM on PATH can predate those headers.
+    if(CMAKE_GENERATOR_INSTANCE)
+        set(REBOOT_CLANG_HINTS
+            "${CMAKE_GENERATOR_INSTANCE}/VC/Tools/Llvm/x64/bin"
+            "${CMAKE_GENERATOR_INSTANCE}/VC/Tools/Llvm/bin")
+    endif()
+    find_program(REBOOT_CLANGXX NAMES clang++ HINTS ${REBOOT_CLANG_HINTS})
     if(REBOOT_CLANGXX)
         add_test(NAME Reboot.NoLoadTimeGlobals
             COMMAND ${REBOOT_CLANGXX} -std=c++17 -fsyntax-only -fno-builtin
