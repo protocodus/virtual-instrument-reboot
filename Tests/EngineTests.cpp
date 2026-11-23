@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -917,6 +918,138 @@ void TestModes() {
     }
 }
 
+// Where the arpeggio steps: the samples at which the first machine's first
+// channel takes another key, polled every 16 samples, over `frames` after a
+// C major chord struck at 0.
+std::vector<int> ArpSteps(Engine& e, int frames, int block = 16) {
+    Play(e, { On(0, 60), On(0, 64), On(0, 67) }, block, block);
+    std::vector<int> at;
+    int key = e.HoldingAt(0, 0).key;
+    for (int done = block; done < frames; done += block) {
+        Play(e, {}, block, block);
+        if (e.HoldingAt(0, 0).key != key)
+            at.push_back(done + block);
+        key = e.HoldingAt(0, 0).key;
+    }
+    return at;
+}
+
+// Sync: Arp rate and Vibrato rate as note values at the song's tempo, on
+// the driver's ticks.
+void TestSync() {
+    Controls c = Plain(0);
+    c[kBoards] = 1;
+    c[kMode] = 2;
+    c[kSync] = 1;
+    c[kArpSync] = 4;   // 1/16
+    const double frame = 70224.0 / 4194304.0 * 48000.0;   // the handheld's frame, in samples
+    // At 120 BPM a 16th is 6000 samples, 7.47 frames: the steps mix 7 and 8
+    // frames, each on the tick nearest its place, so none is off by more
+    // than half a tick (and the poll's 16 samples), and 32 steps in do not
+    // drift.
+    for (int ticks : { 1, 8 }) {
+        c[kDriverRate] = ticks;
+        const auto e = Fresh(c);
+        const std::vector<int> at = ArpSteps(*e, 32 * 6000 + 3000);
+        double worst = 0.0;
+        for (std::size_t k = 0; k < at.size(); ++k)
+            worst = std::max(worst, std::fabs(at[k] - 6000.0 * static_cast<double>(k + 1)));
+        Check(at.size() == 32 && worst <= frame / ticks / 2.0 + 16.0,
+              "sync: " + std::to_string(at.size()) + " 16ths in 4 s at Driver rate " + std::to_string(ticks)
+                  + ", the worst " + std::to_string(worst) + " samples off the song");
+    }
+    // While the song plays, a key's step ends on the song's grid: a key 0.3
+    // of a 16th late steps 0.7 of one later, one 0.3 early 1.3 later, one a
+    // third late (the song having run 2000 samples from its start) two
+    // thirds later; with the song stopped, a whole 16th.
+    {
+        c[kDriverRate] = 8;
+        const double song[] = { 1000.0 + 0.3 / 4.0, 0.7 / 4.0, 0.0, -1.0 };
+        const double first[] = { 4200.0, 7800.0, 4000.0, 6000.0 };
+        for (int k = 0; k < 4; ++k) {
+            const auto e = Fresh(c);
+            e->SetSongPosition(song[k]);
+            if (k == 2)
+                Play(*e, {}, 2000);
+            const std::vector<int> at = ArpSteps(*e, 4 * 6000);
+            bool on = at.size() >= 3;
+            for (std::size_t s = 0; on && s < at.size(); ++s)
+                on = std::fabs(at[s] - first[k] - 6000.0 * static_cast<double>(s)) <= frame / 8.0 / 2.0 + 16.0;
+            Check(on, "sync: with the song at " + std::to_string(song[k]) + " beats the steps are off its grid");
+        }
+    }
+    // At a tempo whose 16th is a whole number of frames (7 at 127.99 BPM),
+    // every step is that number; at half the tempo, twice the length.
+    c[kDriverRate] = 1;
+    {
+        const double bpm = 4194304.0 / 70224.0 * 15.0 / 7.0;
+        const auto e = Fresh(c);
+        e->SetTempo(bpm);
+        std::vector<int> at = ArpSteps(*e, 48000);
+        bool even = at.size() >= 7;
+        for (std::size_t k = 1; even && k < at.size(); ++k)
+            even = std::fabs(at[k] - at[k - 1] - 7.0 * frame) <= 17.0;
+        e->SetTempo(bpm / 2.0);
+        Play(*e, {}, 12000);
+        at = ArpSteps(*e, 48000);
+        for (std::size_t k = 1; even && k < at.size(); ++k)
+            even = std::fabs(at[k] - at[k - 1] - 14.0 * frame) <= 17.0;
+        Check(even, "sync: a 16th of 7 frames is not 7 frames a step, or 14 at half the tempo");
+    }
+    // The same steps however the host cuts its blocks, and at any
+    // oversampling.
+    for (int oversampling : { 1, 4 }) {
+        Controls d = c;
+        d[kDriverRate] = 3;
+        d[kArpSync] = 1;   // 1/32T: 3.73 frames, 11.2 ticks
+        const auto a = Fresh(d, 48000.0, oversampling), b = Fresh(d, 48000.0, oversampling);
+        a->SetTempo(97.0);
+        b->SetTempo(97.0);
+        const std::vector<Event> chord = { On(0, 60), On(0, 64), On(0, 67), On(9000, 72) };
+        const Audio x = Play(*a, chord, 48000, 256), y = Play(*b, chord, 48000, 37);
+        Check(x.left == y.left && x.right == y.right, "sync: the arpeggio depends on the host's blocks at "
+                                                          + std::to_string(oversampling) + "x");
+    }
+    // Vibrato rate with Sync: a cycle of 1/8 is 4 Hz at 120 BPM and 3 Hz at
+    // 90, played exactly as those rates without Sync. Without Sync the
+    // tempo changes nothing.
+    for (double bpm : { 120.0, 90.0 }) {
+        Controls hz = Plain(0);
+        hz[kVibratoDepth] = 50;
+        hz[kVibratoRate] = bpm / 30.0;
+        Controls note = hz;
+        note[kSync] = 1;
+        note[kVibratoSync] = 4;   // 1/8
+        const auto a = Fresh(hz), b = Fresh(note);
+        a->SetTempo(bpm + 31.0);
+        b->SetTempo(bpm);
+        const Audio x = Play(*a, { On(0, 69) }, 48000), y = Play(*b, { On(0, 69) }, 48000);
+        Check(x.left == y.left && x.right == y.right, "sync: a vibrato of 1/8 at " + std::to_string(bpm)
+                                                          + " BPM is not " + std::to_string(bpm / 30.0) + " Hz");
+    }
+    // Any tempo a host sends lands in 1 to 999 BPM: the note sounds on,
+    // and back at 140 BPM the arpeggio steps again.
+    {
+        const auto e = Fresh(c);
+        Play(*e, { On(0, 60), On(0, 64) }, 4800);
+        bool ok = true;
+        for (double bpm : { std::nan(""), -5.0, 0.0, 1.0e9, std::numeric_limits<double>::infinity() }) {
+            e->SetTempo(bpm);
+            const Audio a = Play(*e, {}, 24000);
+            ok = ok && Finite(a) && Rms(a.left, 0, 24000) > 0.01;
+        }
+        e->SetTempo(140.0);
+        Play(*e, {}, 12000);
+        int key = e->HoldingAt(0, 0).key, steps = 0;
+        for (int done = 0; done < 6000; done += 16) {   // a 16th at 140 BPM is 5143 samples
+            Play(*e, {}, 16);
+            steps += e->HoldingAt(0, 0).key != key;
+            key = e->HoldingAt(0, 0).key;
+        }
+        Check(ok && steps > 0, "sync: a wild tempo stops the arpeggio or the sound");
+    }
+}
+
 void TestPedalAndPanic() {
     Controls c = Plain(0);
     c[kRelease] = 0;
@@ -1589,6 +1722,7 @@ int main() {
     TestHeldPitchRecovery();
     TestArpRange();
     TestArpChordEdits();
+    TestSync();
     TestPedalAndPanic();
     TestReset();
     TestEnvelope();

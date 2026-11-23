@@ -14,9 +14,12 @@
 // counts its own frames from its own power-on. The player decides which
 // unit's channel plays which key; its arpeggio steps on the first unit's
 // frame, and each step goes out to every unit at that moment, as a link
-// cable carries a master's ticks. Pitch is always a period register, so the
-// chip's own quantisation, out-of-tune top notes and stepped vibrato are
-// what is heard. The envelope's times are in milliseconds and move the
+// cable carries a master's ticks. With Sync the arpeggio's steps and the
+// vibrato's cycle are note values at the song's tempo, still on the
+// driver's ticks: each step on the tick nearest its time, so none is off by
+// more than half a tick and the steps keep the tempo. Pitch is always a
+// period register, so the chip's own quantisation, out-of-tune top notes
+// and stepped vibrato are what is heard. The envelope's times are in milliseconds and move the
 // volume a fraction of a step each frame; the chip is written the whole
 // step it reaches.
 //
@@ -81,6 +84,15 @@ public:
     // The host's master tuning, -100 .. 100 cents, on every note, held ones
     // too; no MIDI message carries it.
     void SetTune(double cents);
+    // The song's tempo in beats (quarter notes) a minute, taken into 1 to
+    // 999; 120 until a front end sets it. Real time.
+    void SetTempo(double bpm);
+    // While the song plays, its position in beats at the start of the next
+    // Process call; negative or NaN while it is stopped. With Sync, a key
+    // that starts an arpeggio then takes the line of its note value's grid
+    // nearest it as its step's start, so the steps fall on the song's grid
+    // however early or late the key. Real time.
+    void SetSongPosition(double beats);
     void ReleaseAll();             // every key up, the pedal up
     void Panic();                  // every channel silent at once
     // A host's audio reset: every key and the pedal up, and every machine,
@@ -176,6 +188,7 @@ private:
     [[nodiscard]] bool Active(int unit) const noexcept { return unit % kMaxBoards < boards_ && unit / kMaxBoards < Sets(); }
 
     void Apply(bool forceReset);
+    void Times();
     void Revoice(bool reset);
     void Strike(Key& note);
     void RetryHeldPitches();
@@ -207,7 +220,9 @@ private:
     [[nodiscard]] std::int64_t NextTick(int unit) const noexcept {
         return (tickNum_[unit] + periodDen_ - 1) / periodDen_;
     }
-    void Tick(int unit);
+    void Tick(int unit, std::int64_t at);
+    std::int64_t FirstStep() const noexcept;
+    bool ArpDue(std::int64_t at) noexcept;
     [[nodiscard]] std::int64_t ArpRank(const Key& k) const noexcept;
     [[nodiscard]] const Key* ArpSeek(std::int64_t after, int sign) const noexcept;
     const Key& NextArpKey(std::int64_t after) noexcept;
@@ -244,6 +259,15 @@ private:
     // A frame of every unit is periodNum_ / periodDen_ of its cycles; each
     // unit's next falls at tickNum_ / periodDen_, counted from its power-on.
     std::int64_t tickNum_[2 * kMaxBoards] {}, periodNum_ = 1, periodDen_ = 1;
+    // Sync, in 2^-kSongBits host samples: the arpeggio's next step is due
+    // arpDue_ after the next Process call starts, arpStep_ apart, and a tick
+    // takes it when it is due less than halfTick_ after it.
+    static constexpr int kSongBits = 32;
+    bool sync_ = false;
+    int arpSync_ = 4, vibratoSync_ = 5;
+    double tempo_ = 120.0;
+    double song_ = -1.0;                // the song's position in beats, negative while it is stopped
+    std::int64_t arpDue_ = 0, arpStep_ = 0, halfTick_ = 0;
 
     int rate_ = 48000;
     int oversampling_ = 1;

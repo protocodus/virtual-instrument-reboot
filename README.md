@@ -48,6 +48,10 @@ WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
 
+### 0.8.0 — 2026-11-23 — Sync to the song's tempo
+
+Three controls join, each at the value that plays as 0.7.0 did. Sync makes Arp rate and Vibrato rate note values at the song's tempo, which a front end passes in (`Engine::SetTempo`), and while the song plays an arpeggio keeps its grid (`Engine::SetSongPosition`): Arp sync rate is a step of 1/64 to 1/4, Vibrato sync rate a cycle of 1/1 to 1/16T. The driver stays on its frames: each arpeggio step lands on the tick nearest its place in time, so the steps mix lengths of n and n + 1 ticks, as a tracker's rows do at a tempo its frames do not divide, none is off by more than half a tick (8 ms at Driver rate 1, 1 ms at 8), and they never drift.
+
 ### 0.7.0 — 2026-11-23 — the chips' own envelopes, sweeps and sides
 
 Five controls join, each at the value that plays as 0.6.0 did. Envelope Chip hands a note's volume to its channel's own envelope unit: the trigger starts it and the chip steps it, where the driver wrote every step before. It plays the handheld's pulses and noise (climbing, or falling from the Level), the console's and the MMC5's pulses and the console's noise (falling from 15), the disk unit's gain (up to 32, or down from the Level) and the 5B's one envelope, which the newest note takes. Its paces are the nearest to Attack, Decay and Release, and it runs on past Sustain to 0, as a unit does; Envelope Loop lets the console's, the MMC5's and the 5B's fall again and again. Sweep and Sweep pace play the pitch sweeps of the handheld's first pulse and the console's two pulses from each note's start. Sides puts the handheld's first pulse on the left and its second on the right. Load plays the handheld's Line into 32 Ohm headphones, whose socket adds a high-pass near 50 Hz.
@@ -450,6 +454,21 @@ machine blackbox.
   field use; whole ticks a frame are ours. A note's own start and end land
   on its sample, and CH3's `NR32` timer ISR fires at its exact master
   cycle between ticks.
+- **Sync.** With Sync the arpeggio's step and the vibrato's cycle are note
+  values at the song's tempo, which the host passes in (`Engine::SetTempo`,
+  120 BPM until it does). The driver still ticks on its frames. A step is
+  due a note value after the last, counted in time from the arpeggio's first
+  key; while the song plays (`Engine::SetSongPosition`), that key's step
+  starts on the line of the note value's grid nearest it, so the steps keep
+  the song's grid however early or late the key. The tick nearest each
+  step's time takes it: the steps mix lengths of n
+  and n + 1 ticks, as a tracker's rows do at a tempo its frames do not
+  divide, are never more than half a tick off (8.4 ms at Driver rate 1 on
+  the handheld, 1 ms at 8) and never drift. A 16th is a whole number of the
+  handheld's frames only at 895.9 / n BPM (179.2 at 5 frames, 128.0 at 7,
+  59.7 at 15). The vibrato moves each tick by the share of its cycle that a
+  tick is at the tempo. A new tempo or note value keeps the next step's
+  place in its step. Ours.
 - **Envelopes** are times: Attack from silence to full, Decay from full
   down to Sustain, Release from where the key leaves the note down to
   silence. Each frame the envelope moves by the share of its stage that a
@@ -538,8 +557,8 @@ machine blackbox.
 | Attack, Decay, Release | 0 to 5000 ms | the envelope's times |
 | Transpose, Fine, Mod | ±24 semitones, ±50 cents, 0 to 63 | pitch, and the disk unit's modulation depth |
 | Mode | Poly, Mono, Arp | how keys take voices |
-| Arp rate | 1 to 8 ticks | ticks an arpeggio step holds |
-| Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz, 0 to 1000 ms | written at the frame; the mod wheel adds up to 50 cents |
+| Arp rate | 1 to 8 ticks | ticks an arpeggio step holds, without Sync |
+| Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz, 0 to 1000 ms | written at the frame; the mod wheel adds up to 50 cents; the rate without Sync |
 | Glide | 0 to 1000 ms | a Mono legato note's slide |
 | Bend range | 0 to 12 semitones | the pitch wheel |
 | Velocity | 0 to 1 | how far a key's velocity scales the level |
@@ -553,6 +572,9 @@ machine blackbox.
 | Sweep, Sweep pace | -7 to 7; 1 to 8 | the pulses' pitch sweep from each note's start (+ up, − down, a step's size 8 minus the shift), and its steps apart |
 | Sides | Both, Spread | the handheld's channels on both sides, or its first pulse left and its second right |
 | Load | Line input, Headphones | what the handheld's socket drives on Line |
+| Sync | Off, On | Arp rate and Vibrato rate as note values at the song's tempo, on the driver's nearest ticks |
+| Arp sync rate | 1/64, 1/32T, 1/32, 1/16T, 1/16, 1/8T, 1/8, 1/4 | an arpeggio step, with Sync |
+| Vibrato sync rate | 1/1, 1/2, 1/4, 1/4T, 1/8, 1/8T, 1/16, 1/16T | a vibrato cycle, with Sync |
 | Oversampling | 1x, 2x, 4x, 8x | setup, not a control: the machines' rate over the host's (`Engine::Prepare`) |
 
 The control ids, ranges and defaults are `Source/DSP/RebootControls.h`, which

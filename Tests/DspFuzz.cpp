@@ -51,7 +51,16 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
             switch (input.Pick(3)) {
                 case 0: engine->SetBend(input.Scalar()); break;
                 case 1: engine->SetWheel(input.Scalar()); break;
-                default: engine->SetTune(input.Scalar() * 200.0 - 100.0); break;
+                default: {
+                    // The tempo and the song's place ride on the tune's
+                    // draw, so the committed crash inputs replay the paths
+                    // they found.
+                    const double x = input.Scalar();
+                    engine->SetTune(x * 200.0 - 100.0);
+                    engine->SetTempo(x * 2000.0 - 500.0);
+                    engine->SetSongPosition(x * 2.0e9 - 1.0e8);
+                    break;
+                }
             }
             break;
         case 6:

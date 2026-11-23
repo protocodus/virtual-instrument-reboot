@@ -229,6 +229,16 @@ public:
             rule.reach = Reach::NewNotes;
             rule.reason = "a sweep runs from the trigger it is written before (NR10, $4001)";
             break;
+        case kSync:
+            // Heard in the vibrato's rate: 5.5 Hz, or a 1/8T at 120 BPM.
+            with({ { kVibratoDepth, 50 } });
+            break;
+        case kArpSync:
+            with({ { kSync, 1 }, { kMode, 2 } });
+            break;
+        case kVibratoSync:
+            with({ { kSync, 1 }, { kVibratoDepth, 50 } });
+            break;
         default:
             break;
         }

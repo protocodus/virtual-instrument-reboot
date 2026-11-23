@@ -18,6 +18,12 @@ bool Same(const ChannelSettings& a, const ChannelSettings& b) noexcept {
         && a.spread == b.spread;
 }
 
+// Arp rate and Vibrato rate with Sync, in beats (quarter notes), in their
+// controls' order (RebootControls.h): an arpeggio's step, longer as the
+// knob turns; a vibrato's cycle, shorter as the knob turns. Ours.
+constexpr double kArpBeats[8] = { 1.0 / 16.0, 1.0 / 12.0, 1.0 / 8.0, 1.0 / 6.0, 1.0 / 4.0, 1.0 / 3.0, 1.0 / 2.0, 1.0 };
+constexpr double kVibratoBeats[8] = { 4.0, 2.0, 1.0, 2.0 / 3.0, 1.0 / 2.0, 1.0 / 3.0, 1.0 / 4.0, 1.0 / 6.0 };
+
 // The pace code whose step is nearest `cycles`, within the unit's.
 int PaceFor(double cycles, const EnvelopeUnit& unit) noexcept {
     return Clamp(Round(cycles / unit.cycles), 1, unit.paces);
@@ -74,6 +80,7 @@ void Engine::Apply(bool forceReset) {
     const double oldDetune = detune_;
     const int oldOrder = arpOrder_;
     const int oldEnvelope = envelope_;
+    const bool wasSync = sync_;
     const Controls& c = controls_;
     mode_ = Clamp(Round(c[kMode]), 0, 2);
     arpRate_ = Clamp(Round(c[kArpRate]), 1, 8);
@@ -89,6 +96,9 @@ void Engine::Apply(bool forceReset) {
     sweep_ = Clamp(Round(c[kSweep]), -7, 7);
     sweepPace_ = Clamp(Round(c[kSweepPace]), 1, 8);
     spread_ = c[kSides] >= 0.5;
+    sync_ = c[kSync] >= 0.5;
+    arpSync_ = Clamp(Round(c[kArpSync]), 0, 7);
+    vibratoSync_ = Clamp(Round(c[kVibratoSync]), 0, 7);
     for (Machine& m : machines_)
         m.SetHeadphones(c[kLoad] >= 0.5);
     const int ticks = Clamp(Round(c[kDriverRate]), 1, 8);
@@ -160,18 +170,74 @@ void Engine::Apply(bool forceReset) {
         trimFramesLeft_ = duration;
         trim_ = targetTrim;
     }
-    // The driver holds its times in ticks.
-    const double tickHz = frameHz_ * ticks_;
-    attack_ = c[kAttack] / 1000.0 * tickHz;
-    decay_ = c[kDecay] / 1000.0 * tickHz;
-    release_ = c[kRelease] / 1000.0 * tickHz;
-    vibratoStep_ = c[kVibratoRate] / tickHz;
-    vibratoDelay_ = Round(c[kVibratoDelay] / 1000.0 * tickHz);
-    glideFrames_ = Round(c[kGlide] / 1000.0 * tickHz);
+    Times();
+    // With Sync on, a running arpeggio steps as if its key were struck now.
+    if (sync_ && !wasSync)
+        arpDue_ = FirstStep();
     gain_ = std::pow(10.0, c[kVolume] / 20.0);
     // A new envelope takes a trigger on the chip, so the held keys play again.
     if (reset || oldMode != mode_ || oldPart != part_ || oldEnvelope != envelope_)
         Revoice(reset);
+}
+
+// The driver holds its times in ticks. With Sync, Arp rate and Vibrato
+// rate are note values at the song's tempo: the arpeggio's steps are due on
+// the song's time (ArpDue), and the vibrato moves as far a tick as its
+// cycle at that tempo asks.
+void Engine::Times() {
+    const Controls& c = controls_;
+    const double tickHz = frameHz_ * ticks_;
+    attack_ = c[kAttack] / 1000.0 * tickHz;
+    decay_ = c[kDecay] / 1000.0 * tickHz;
+    release_ = c[kRelease] / 1000.0 * tickHz;
+    vibratoStep_ = (sync_ ? tempo_ / 60.0 / kVibratoBeats[vibratoSync_] : c[kVibratoRate]) / tickHz;
+    vibratoDelay_ = Round(c[kVibratoDelay] / 1000.0 * tickHz);
+    glideFrames_ = Round(c[kGlide] / 1000.0 * tickHz);
+    const double unit = static_cast<double>(std::int64_t { 1 } << kSongBits);
+    halfTick_ = static_cast<std::int64_t>(rate_ / tickHz / 2.0 * unit);
+    const std::int64_t step = static_cast<std::int64_t>(kArpBeats[arpSync_] * 60.0 / tempo_ * rate_ * unit + 0.5);
+    // A new tempo or note value keeps the next step's place in its step.
+    if (arpStep_ > 0 && step != arpStep_)
+        arpDue_ = static_cast<std::int64_t>(static_cast<double>(arpDue_) * (static_cast<double>(step) / static_cast<double>(arpStep_)));
+    arpStep_ = step;
+}
+
+void Engine::SetTempo(double bpm) {
+    bpm = bpm >= 1.0 ? (bpm <= 999.0 ? bpm : 999.0) : bpm == bpm ? 1.0 : tempo_;
+    if (bpm == tempo_)
+        return;
+    tempo_ = bpm;
+    Times();
+}
+
+void Engine::SetSongPosition(double beats) {
+    song_ = beats >= 0.0 && beats <= 1.0e9 ? beats : -1.0;
+}
+
+// Sync: how long the step of a key struck now lasts. While the song plays,
+// the step starts on the line of the note value's grid nearest the key, so
+// it lasts from half a step to one and a half (ours: a sequencer's
+// arpeggiator keeps the song's grid in the same way).
+std::int64_t Engine::FirstStep() const noexcept {
+    if (song_ < 0.0)
+        return arpStep_;
+    const double steps = song_ / kArpBeats[arpSync_];
+    const double phase = steps - static_cast<double>(static_cast<std::int64_t>(steps));
+    return static_cast<std::int64_t>((phase < 0.5 ? 1.0 - phase : 2.0 - phase) * static_cast<double>(arpStep_));
+}
+
+// Sync: whether unit 0's tick `at` takes the arpeggio's next step, which
+// it does when the step is due nearer it than the tick after, so no step
+// is off by more than half a tick and the steps keep the song's tempo, as a
+// tracker's rows do at a tempo its frames do not divide (mixing lengths of
+// n and n + 1). A step shorter than a tick waits for the next.
+bool Engine::ArpDue(std::int64_t at) noexcept {
+    if (arpDue_ - at >= halfTick_)
+        return false;
+    arpDue_ += arpStep_;
+    if (arpDue_ - at < halfTick_)
+        arpDue_ = at + arpStep_;
+    return true;
 }
 
 // Ends every note (after a reset, the machines are silent already) and
@@ -199,7 +265,7 @@ void Engine::Revoice(bool reset) {
     default: {
         arpUp_ = true;
         const Key& first = NextArpKey(-1);
-        arpKey_ = first.key, arpRank_ = ArpRank(first), arpCount_ = 0;
+        arpKey_ = first.key, arpRank_ = ArpRank(first), arpCount_ = 0, arpDue_ = FirstStep();
         mono_ = StartNote(first.key, first.velocity);
         break;
     }
@@ -412,7 +478,7 @@ void Engine::Strike(Key& note) {
         // runs joins it.
         if (mono_ >= 0 && slots_[mono_].gate)
             break;
-        arpKey_ = key, arpRank_ = ArpRank(note), arpCount_ = 0;
+        arpKey_ = key, arpRank_ = ArpRank(note), arpCount_ = 0, arpDue_ = FirstStep();
         arpUp_ = true;
         if (mono_ >= 0)
             End(mono_);
@@ -946,14 +1012,15 @@ void Engine::Pace(int unit) noexcept {
     tickNum_[unit] = periodNum_ * (now * periodDen_ / periodNum_ + 1);
 }
 
-// A unit's frame. On the first unit's, the player's arpeggio, whose every
-// step starts the envelope again on every set; then, for each note on this
-// unit, its driver's envelope, glide, vibrato and pitch wheel.
-void Engine::Tick(int unit) {
+// A unit's frame, `at` into the block (in 2^-kSongBits host samples). On
+// the first unit's, the player's arpeggio, whose every step starts the
+// envelope again on every set; then, for each note on this unit, its
+// driver's envelope, glide, vibrato and pitch wheel.
+void Engine::Tick(int unit, std::int64_t at) {
     tickNum_[unit] += periodNum_;
     const int set = unit / kMaxBoards, board = unit % kMaxBoards;
     int restarted = -1;
-    if (unit == 0 && mode_ == 2 && heldCount_ > 0 && ++arpCount_ >= arpRate_) {
+    if (unit == 0 && mode_ == 2 && heldCount_ > 0 && (sync_ ? ArpDue(at) : ++arpCount_ >= arpRate_)) {
         arpCount_ = 0;
         const Key& next = NextArpKey(arpRank_);
         arpKey_ = next.key, arpRank_ = ArpRank(next);
@@ -1042,8 +1109,13 @@ void Engine::Process(float* left, float* right, int frames) {
             const std::int64_t tick = NextTick(due);
             machines_[due].RunTo(tick);
             machines_[due].ServiceAt(tick);
-            Tick(due);
+            Tick(due, (at << (kSongBits - StepBuffer::kSubBits)) / oversampling_);
         }
+        // The arpeggio's next step, from the next block's start.
+        if (sync_ && mode_ == 2 && heldCount_ > 0)
+            arpDue_ -= static_cast<std::int64_t>(n) << kSongBits;
+        if (song_ >= 0.0)
+            song_ += n * tempo_ / 60.0 / rate_;
         for (int u = 0; u < 2 * kMaxBoards; ++u)
             if (Active(u))
                 machines_[u].Render(m, path_, bus_[u < kMaxBoards ? 0 : 2], bus_[u < kMaxBoards ? 1 : 3]);
