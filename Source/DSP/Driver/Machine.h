@@ -249,6 +249,10 @@ public:
         }
     }
 
+    // What the handheld's socket drives (Handheld::SetHeadphones); the
+    // console's outputs have no socket of the kind.
+    void SetHeadphones(bool on) noexcept { handheld_.SetHeadphones(on); }
+
     void SetBias(int level) {
         if (kind_ == BoardKind::Console)
             consoleDriver_.SetBias(console_, level);

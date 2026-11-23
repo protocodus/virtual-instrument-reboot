@@ -60,6 +60,7 @@ enum Control : int {
     kSweep,             // the pulse sweep's step from a note's start, -7 to 7: + up, - down, the size 8 - its shift; 0 none
     kSweepPace,         // the sweep's steps apart, 1 to 8 of its unit's ticks
     kSides,             // the handheld's sides: 0 every channel to both, 1 pulse 1 left and pulse 2 right
+    kLoad,              // what the handheld's socket drives on Line: 0 a line input, 1 headphones of 32 Ohm
     kControlCount
 };
 
@@ -113,6 +114,7 @@ inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "sweep", "Sweep", -7.0, 7.0, 0.0, 0, Curve::kInteger, "" },
     { "sweep_pace", "Sweep pace", 1.0, 8.0, 4.0, 8, Curve::kStepped, "" },
     { "sides", "Sides", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
+    { "load", "Load", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
 } };
 
 // The value of control `index` at normalised position n (clamped to 0..1).

@@ -89,6 +89,8 @@ void Engine::Apply(bool forceReset) {
     sweep_ = Clamp(Round(c[kSweep]), -7, 7);
     sweepPace_ = Clamp(Round(c[kSweepPace]), 1, 8);
     spread_ = c[kSides] >= 0.5;
+    for (Machine& m : machines_)
+        m.SetHeadphones(c[kLoad] >= 0.5);
     const int ticks = Clamp(Round(c[kDriverRate]), 1, 8);
     if (arpOrder_ != oldOrder)
         ArpAnchor();

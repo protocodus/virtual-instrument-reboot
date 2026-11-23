@@ -1227,6 +1227,34 @@ void TestChipUnits() {
     }
 }
 
+// Load: Line into headphones adds the socket's 100 uF into 32 Ohm, a
+// high-pass at 49.7 Hz, which takes C2's fundamental (65.4 Hz) to 0.796 of
+// what a line input gets; Pin has no socket.
+void TestLoad() {
+    const auto fundamental = [](const std::vector<float>& x, double hz) {
+        double re = 0.0, im = 0.0;
+        const std::size_t from = 24000, to = 48000;
+        for (std::size_t i = from; i < to; ++i) {
+            const double phase = 6.283185307179586 * hz * static_cast<double>(i) / 48000.0;
+            re += x[i] * std::cos(phase);
+            im += x[i] * std::sin(phase);
+        }
+        return std::hypot(re, im);
+    };
+    const double hz = 440.0 * std::pow(2.0, (36 - 69) / 12.0);
+    for (int path : { 1, 0 }) {
+        Controls c = Plain(0);
+        c[kPath] = path;
+        const Audio line = Play(*Fresh(c), { On(0, 36) }, 48000);
+        c[kLoad] = 1;
+        const Audio phones = Play(*Fresh(c), { On(0, 36) }, 48000);
+        const double ratio = fundamental(phones.left, hz) / fundamental(line.left, hz);
+        const double expect = path == 1 ? hz / std::hypot(hz, 1.0 / (2.0 * 3.141592653589793 * 100e-6 * 32.0)) : 1.0;
+        Check(std::fabs(ratio - expect) < 0.01, std::string("load: headphones take C2's fundamental to ") + std::to_string(ratio)
+              + " of a line input's on " + (path == 1 ? "Line" : "Pin") + ", not " + std::to_string(expect));
+    }
+}
+
 // The cartridge chips' own envelopes: the disk unit's (expansion D) from
 // the Level's gain, up to 32 or down to 0; the 5B's (expansion E) from its
 // top, shared by its three channels.
@@ -1566,6 +1594,7 @@ int main() {
     TestEnvelope();
     TestChipUnits();
     TestCartridgeUnits();
+    TestLoad();
     TestHeldWaves();
     TestTouch();
     TestBounds();

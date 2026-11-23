@@ -35,8 +35,15 @@
 // capacitor and the 176 Hz after it, which Ken Shirriff's die analysis of
 // its IR3R53N says has "an external feedback capacitor, which causes it to
 // act as a high-pass filter" (righto.com, 2020-06). Pan Docs' "use 0.998943
-// for MGB&CGB", one pole near 706 Hz, is neither. The amplifier's gain,
-// the headphone socket and the speaker are not modelled (README, Known gaps).
+// for MGB&CGB", one pole near 706 Hz, is neither. Those recordings are the
+// socket into a line input, where its coupling capacitor's corner is under
+// 1 Hz. Into headphones (SetHeadphones) the capacitor and the load make one
+// more high-pass: 100 uF, the original's headphone board's two capacitors
+// (C1, C2 in its parts lists; reported), into 32 Ohm, a typical headphone
+// with nothing in series (estimate), about 50 Hz; the Color's socket is
+// taken as the original's (sibling: its value is not published). The
+// amplifier's gain and clipping and the speaker are not modelled (README,
+// Known gaps).
 
 #include "../Chips/GameBoyApu.h"
 #include "Board.h"
@@ -73,6 +80,8 @@ public:
         capacitorDesign_[kOriginal].Design(1.0 - (1.0 - 0.999958) * traits.corner, sampleRate);
         capacitorDesign_[kColor].Design(1.0 - (1.0 - kColorCapacitor) * traits.corner, sampleRate);
         colorHighPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::HighPass, 176.0 * traits.corner, sampleRate);
+        socket_[0].Design(FirstOrder::Kind::HighPass, kSocketHz * traits.corner, sampleRate);
+        socket_[1].Design(FirstOrder::Kind::HighPass, kSocketHz * traits.corner, sampleRate);
         DesignPinBlocker(pinBlocker_[0], sampleRate);
         DesignPinBlocker(pinBlocker_[1], sampleRate);
         // Reported: SameBoy (MIT, Core/apu.c) models pre-GBA physical DAC
@@ -98,6 +107,7 @@ public:
                                           color ? colorHighPass_ : FirstOrder::Coefficients {});
             amplifier_[s].Reset();
             pinBlocker_[s].Reset();
+            socket_[s].Reset();
             dacResidual_[s] = 0.0;
         }
         for (int c = 0; c < kChannels; ++c) {
@@ -142,6 +152,7 @@ public:
         capacitor_[1].Settle(right);
         for (int s = 0; s < 2; ++s) {
             amplifier_[s].Reset();
+            socket_[s].Reset();
             dacOff_[s].Clear();
             dacResidual_[s] = 0.0;
         }
@@ -162,6 +173,9 @@ public:
     }
     // A trimmer on the unit's crystal, turned at the block's start.
     void SetTrim(std::int64_t trim) noexcept { tb_.Trim(traits_.clock + trim); }
+    // Line into headphones, else into a line input. The socket's high-pass
+    // runs either way, so a change is heard from where the signal is.
+    void SetHeadphones(bool on) noexcept { headphones_ = on; }
 
     void RunTo(std::int64_t cycle) {
         Sink sink { this };
@@ -214,7 +228,8 @@ private:
                 }
                 const double pin = pinBlocker_[side].Process(bus[side][i]);
                 const double line = amplifier_[side].Process(capacitor_[side].Process(in));
-                out[side][i] += static_cast<float>((path == Path::Line ? line : pin) * traits_.level);
+                const double socket = socket_[side].Process(line);
+                out[side][i] += static_cast<float>((path == Path::Line ? (headphones_ ? socket : line) : pin) * traits_.level);
             }
         }
     }
@@ -279,6 +294,9 @@ private:
     FirstOrder::Coefficients colorHighPass_;
     FirstOrder amplifier_[2];   // the Color's feedback high-pass; the original's passes
     FirstOrder pinBlocker_[2];
+    static constexpr double kSocketHz = 1.0 / (2.0 * 3.141592653589793 * 100e-6 * 32.0);
+    FirstOrder socket_[2];      // the headphone socket's capacitor into its load
+    bool headphones_ = false;
     double dacFadeFactor_ = 0.0;
     bool wasDacOn_[kChannels] {};
     double lastChSide_[kChannels][2] {};
