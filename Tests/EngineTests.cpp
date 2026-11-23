@@ -978,6 +978,25 @@ void TestSync() {
             Check(on, "sync: with the song at " + std::to_string(song[k]) + " beats the steps are off its grid");
         }
     }
+    // Glide with Sync: a 1/16 at 120 BPM glides as 125 ms does without it,
+    // and Off as no glide does.
+    {
+        Controls ms = Plain(0);
+        ms[kMode] = 1;
+        ms[kGlide] = 125;
+        Controls note = ms, none = ms;
+        note[kSync] = 1;
+        note[kGlideSync] = 3;   // 1/16
+        none[kGlide] = 0;
+        Controls off = note;
+        off[kGlideSync] = 0;
+        const auto glide = [](const Controls& k) {
+            const auto e = Fresh(k);
+            return Play(*e, { On(0, 60), On(9600, 67) }, 24000).left;
+        };
+        const std::vector<float> a = glide(ms), b = glide(note), n = glide(none), o = glide(off);
+        Check(a == b && n == o && a != n, "sync: a glide of 1/16 at 120 BPM is not 125 ms, or Off glides");
+    }
     // At a tempo whose 16th is a whole number of frames (7 at 127.99 BPM),
     // every step is that number; at half the tempo, twice the length.
     c[kDriverRate] = 1;
@@ -1048,6 +1067,28 @@ void TestSync() {
         }
         Check(ok && steps > 0, "sync: a wild tempo stops the arpeggio or the sound");
     }
+}
+
+// Volume is ours, after the machines: a turn of 12 dB moves the output
+// over 64 samples (each by under 2% of the level), not at once, and arrives.
+void TestVolumeRamp() {
+    Controls c = Plain(0);
+    const auto a = Fresh(c), b = Fresh(c);
+    Play(*a, { On(0, 69) }, 4800);
+    Play(*b, { On(0, 69) }, 4800);
+    c[kVolume] -= 12.0;
+    b->SetControls(c);
+    const Audio x = Play(*a, {}, 480), y = Play(*b, {}, 480);
+    double last = 1.0, worst = 0.0;
+    for (std::size_t i = 0; i < x.left.size(); ++i) {
+        if (std::fabs(x.left[i]) < 0.01f)
+            continue;
+        const double r = y.left[i] / x.left[i];
+        worst = std::max(worst, std::fabs(r - last));
+        last = r;
+    }
+    Check(worst < 0.02 && std::fabs(last - std::pow(10.0, -12.0 / 20.0)) < 1.0e-3,
+          "volume: a turn steps the output by " + std::to_string(worst) + " at once, or ends at " + std::to_string(last));
 }
 
 void TestPedalAndPanic() {
@@ -1723,6 +1764,7 @@ int main() {
     TestArpRange();
     TestArpChordEdits();
     TestSync();
+    TestVolumeRamp();
     TestPedalAndPanic();
     TestReset();
     TestEnvelope();

@@ -48,6 +48,10 @@ WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
 
+### 0.9.0 — 2026-11-23 — Glide with Sync, and a Volume that does not click
+
+One control joins, at the value that plays as 0.8.0 did. With Sync, Glide sync time makes Glide a note value at the song's tempo, as Arp rate and Vibrato rate already were: Off, or 1/64 to 1/1, which the glide covers in the driver's ticks nearest it. Volume, our trim after the machines, now moves over 64 samples when it changes, where it jumped at once and clicked. The chips' own steps are untouched: a volume register written, a note started or stopped, still steps the output as it did on the hardware.
+
 ### 0.8.0 — 2026-11-23 — Sync to the song's tempo
 
 Three controls join, each at the value that plays as 0.7.0 did. Sync makes Arp rate and Vibrato rate note values at the song's tempo, which a front end passes in (`Engine::SetTempo`), and while the song plays an arpeggio keeps its grid (`Engine::SetSongPosition`): Arp sync rate is a step of 1/64 to 1/4, Vibrato sync rate a cycle of 1/1 to 1/16T. The driver stays on its frames: each arpeggio step lands on the tick nearest its place in time, so the steps mix lengths of n and n + 1 ticks, as a tracker's rows do at a tempo its frames do not divide, none is off by more than half a tick (8 ms at Driver rate 1, 1 ms at 8), and they never drift.
@@ -454,8 +458,8 @@ machine blackbox.
   field use; whole ticks a frame are ours. A note's own start and end land
   on its sample, and CH3's `NR32` timer ISR fires at its exact master
   cycle between ticks.
-- **Sync.** With Sync the arpeggio's step and the vibrato's cycle are note
-  values at the song's tempo, which the host passes in (`Engine::SetTempo`,
+- **Sync.** With Sync the arpeggio's step, the vibrato's cycle and a
+  glide's time are note values at the song's tempo, which the host passes in (`Engine::SetTempo`,
   120 BPM until it does). The driver still ticks on its frames. A step is
   due a note value after the last, counted in time from the arpeggio's first
   key; while the song plays (`Engine::SetSongPosition`), that key's step
@@ -467,8 +471,9 @@ machine blackbox.
   the handheld, 1 ms at 8) and never drift. A 16th is a whole number of the
   handheld's frames only at 895.9 / n BPM (179.2 at 5 frames, 128.0 at 7,
   59.7 at 15). The vibrato moves each tick by the share of its cycle that a
-  tick is at the tempo. A new tempo or note value keeps the next step's
-  place in its step. Ours.
+  tick is at the tempo, and a glide takes the whole number of ticks nearest
+  its note value (Off slides at once). A new tempo or note value keeps the
+  next step's place in its step. Ours.
 - **Envelopes** are times: Attack from silence to full, Decay from full
   down to Sustain, Release from where the key leaves the note down to
   silence. Each frame the envelope moves by the share of its stage that a
@@ -538,8 +543,10 @@ machine blackbox.
   gain after the machine, a fader on the mixing desk: the chip, its DACs,
   its mixer and its output stage play as they do, and the steps of Level,
   velocity and the envelope keep their own sizes. A change of part or shape
-  moves the trim across one block. Volume trims from there, and the
-  portfolio's output stage keeps every sample under -1.5 dBFS.
+  moves the trim across one block. Volume trims from there, moving over 64
+  samples when it changes so that turning it does not step the output
+  (ours), and the portfolio's output stage keeps every sample under
+  -1.5 dBFS.
 
 ### Controls
 
@@ -559,7 +566,7 @@ machine blackbox.
 | Mode | Poly, Mono, Arp | how keys take voices |
 | Arp rate | 1 to 8 ticks | ticks an arpeggio step holds, without Sync |
 | Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz, 0 to 1000 ms | written at the frame; the mod wheel adds up to 50 cents; the rate without Sync |
-| Glide | 0 to 1000 ms | a Mono legato note's slide |
+| Glide | 0 to 1000 ms | a Mono legato note's slide, without Sync |
 | Bend range | 0 to 12 semitones | the pitch wheel |
 | Velocity | 0 to 1 | how far a key's velocity scales the level |
 | Double, Detune | Off, On; 0 to 50 cents | a second set of units on the right; Detune pulls the two sets' crystals apart |
@@ -572,9 +579,10 @@ machine blackbox.
 | Sweep, Sweep pace | -7 to 7; 1 to 8 | the pulses' pitch sweep from each note's start (+ up, − down, a step's size 8 minus the shift), and its steps apart |
 | Sides | Both, Spread | the handheld's channels on both sides, or its first pulse left and its second right |
 | Load | Line input, Headphones | what the handheld's socket drives on Line |
-| Sync | Off, On | Arp rate and Vibrato rate as note values at the song's tempo, on the driver's nearest ticks |
+| Sync | Off, On | Arp rate, Vibrato rate and Glide as note values at the song's tempo, on the driver's nearest ticks |
 | Arp sync rate | 1/64, 1/32T, 1/32, 1/16T, 1/16, 1/8T, 1/8, 1/4 | an arpeggio step, with Sync |
 | Vibrato sync rate | 1/1, 1/2, 1/4, 1/4T, 1/8, 1/8T, 1/16, 1/16T | a vibrato cycle, with Sync |
+| Glide sync time | Off, 1/64, 1/32, 1/16, 1/8, 1/4, 1/2, 1/1 | a glide, with Sync |
 | Oversampling | 1x, 2x, 4x, 8x | setup, not a control: the machines' rate over the host's (`Engine::Prepare`) |
 
 The control ids, ranges and defaults are `Source/DSP/RebootControls.h`, which

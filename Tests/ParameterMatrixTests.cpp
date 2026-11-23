@@ -239,6 +239,12 @@ public:
         case kVibratoSync:
             with({ { kSync, 1 }, { kVibratoDepth, 50 } });
             break;
+        case kGlideSync:
+            with({ { kSync, 1 }, { kMode, 1 } });
+            rule.reach = Reach::NewNotes;
+            rule.reason = "a glide is taken when a key moves a Mono note, not while it holds";
+            rule.history = "a glide starts wherever its note is";
+            break;
         default:
             break;
         }

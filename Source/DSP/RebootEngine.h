@@ -264,7 +264,7 @@ private:
     // takes it when it is due less than halfTick_ after it.
     static constexpr int kSongBits = 32;
     bool sync_ = false;
-    int arpSync_ = 4, vibratoSync_ = 5;
+    int arpSync_ = 4, vibratoSync_ = 5, glideSync_ = 2;
     double tempo_ = 120.0;
     double song_ = -1.0;                // the song's position in beats, negative while it is stopped
     std::int64_t arpDue_ = 0, arpStep_ = 0, halfTick_ = 0;
@@ -281,6 +281,10 @@ private:
     bool spread_ = false;               // Sides
     bool chip_ = false;                 // Poly channels: the chip's other pitched parts too
     double vibratoDepth_ = 0.0, velocity_ = 0.5, gain_ = 0.0;
+    // Volume's ramp: from gainFrom_ by gainStep_ a host sample, gainLeft_ to go.
+    static constexpr int kGainRampFrames = 64;
+    double gainFrom_ = 0.0, gainStep_ = 0.0;
+    int gainLeft_ = 0;
     double bend_ = 0.0, wheel_ = 0.0, tune_ = 0.0;
     bool pedal_ = false;
     bool retryPitch_ = false;

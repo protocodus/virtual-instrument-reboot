@@ -62,9 +62,11 @@ enum Control : int {
     kSides,             // the handheld's sides: 0 every channel to both, 1 pulse 1 left and pulse 2 right
     kLoad,              // what the handheld's socket drives on Line: 0 a line input, 1 headphones of 32 Ohm
     // Added in 0.8.0, each at the value that plays as 0.7.0 did.
-    kSync,              // 1 Arp rate and Vibrato rate as note values at the song's tempo (SetTempo), on the driver's ticks nearest them
+    kSync,              // 1 Arp rate, Vibrato rate and (from 0.9.0) Glide as note values at the song's tempo (SetTempo), on the driver's ticks nearest them
     kArpSync,           // Arp rate with Sync, a step of: 1/64, 1/32T, 1/32, 1/16T, 1/16, 1/8T, 1/8, 1/4
     kVibratoSync,       // Vibrato rate with Sync, a cycle of: 1/1, 1/2, 1/4, 1/4T, 1/8, 1/8T, 1/16, 1/16T
+    // Added in 0.9.0; without Sync it changes nothing.
+    kGlideSync,         // Glide with Sync, a time of: off, 1/64, 1/32, 1/16, 1/8, 1/4, 1/2, 1/1
     kControlCount
 };
 
@@ -122,6 +124,7 @@ inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "sync", "Sync", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
     { "arp_sync", "Arp sync rate", 0.0, 7.0, 4.0, 8, Curve::kStepped, "" },
     { "vibrato_sync", "Vibrato sync rate", 0.0, 7.0, 5.0, 8, Curve::kStepped, "" },
+    { "glide_sync", "Glide sync time", 0.0, 7.0, 2.0, 8, Curve::kStepped, "" },
 } };
 
 // The value of control `index` at normalised position n (clamped to 0..1).

@@ -23,6 +23,7 @@ bool Same(const ChannelSettings& a, const ChannelSettings& b) noexcept {
 // knob turns; a vibrato's cycle, shorter as the knob turns. Ours.
 constexpr double kArpBeats[8] = { 1.0 / 16.0, 1.0 / 12.0, 1.0 / 8.0, 1.0 / 6.0, 1.0 / 4.0, 1.0 / 3.0, 1.0 / 2.0, 1.0 };
 constexpr double kVibratoBeats[8] = { 4.0, 2.0, 1.0, 2.0 / 3.0, 1.0 / 2.0, 1.0 / 3.0, 1.0 / 4.0, 1.0 / 6.0 };
+constexpr double kGlideBeats[8] = { 0.0, 1.0 / 16.0, 1.0 / 8.0, 1.0 / 4.0, 1.0 / 2.0, 1.0, 2.0, 4.0 };
 
 // The pace code whose step is nearest `cycles`, within the unit's.
 int PaceFor(double cycles, const EnvelopeUnit& unit) noexcept {
@@ -50,7 +51,7 @@ void Engine::Prepare(double sampleRate, int oversampling) {
     pedal_ = false;
     bend_ = wheel_ = 0.0;
     Apply(true);
-    trimFramesLeft_ = 0;
+    trimFramesLeft_ = gainLeft_ = 0;
 }
 
 void Engine::SetControls(const Controls& raw) {
@@ -99,6 +100,7 @@ void Engine::Apply(bool forceReset) {
     sync_ = c[kSync] >= 0.5;
     arpSync_ = Clamp(Round(c[kArpSync]), 0, 7);
     vibratoSync_ = Clamp(Round(c[kVibratoSync]), 0, 7);
+    glideSync_ = Clamp(Round(c[kGlideSync]), 0, 7);
     for (Machine& m : machines_)
         m.SetHeadphones(c[kLoad] >= 0.5);
     const int ticks = Clamp(Round(c[kDriverRate]), 1, 8);
@@ -174,7 +176,15 @@ void Engine::Apply(bool forceReset) {
     // With Sync on, a running arpeggio steps as if its key were struck now.
     if (sync_ && !wasSync)
         arpDue_ = FirstStep();
-    gain_ = std::pow(10.0, c[kVolume] / 20.0);
+    // Volume is ours, after the machines: it moves over kGainRampFrames, so
+    // turning it does not step the output.
+    const double gain = std::pow(10.0, c[kVolume] / 20.0);
+    if (gain != gain_) {
+        gainFrom_ = gainLeft_ > 0 ? gainFrom_ + gainStep_ * (kGainRampFrames - gainLeft_) : gain_;
+        gainStep_ = (gain - gainFrom_) / kGainRampFrames;
+        gainLeft_ = kGainRampFrames;
+        gain_ = gain;
+    }
     // A new envelope takes a trigger on the chip, so the held keys play again.
     if (reset || oldMode != mode_ || oldPart != part_ || oldEnvelope != envelope_)
         Revoice(reset);
@@ -192,7 +202,7 @@ void Engine::Times() {
     release_ = c[kRelease] / 1000.0 * tickHz;
     vibratoStep_ = (sync_ ? tempo_ / 60.0 / kVibratoBeats[vibratoSync_] : c[kVibratoRate]) / tickHz;
     vibratoDelay_ = Round(c[kVibratoDelay] / 1000.0 * tickHz);
-    glideFrames_ = Round(c[kGlide] / 1000.0 * tickHz);
+    glideFrames_ = Round((sync_ ? kGlideBeats[glideSync_] * 60.0 / tempo_ : c[kGlide] / 1000.0) * tickHz);
     const double unit = static_cast<double>(std::int64_t { 1 } << kSongBits);
     halfTick_ = static_cast<std::int64_t>(rate_ / tickHz / 2.0 * unit);
     const std::int64_t step = static_cast<std::int64_t>(kArpBeats[arpSync_] * 60.0 / tempo_ * rate_ * unit + 0.5);
@@ -447,7 +457,7 @@ void Engine::Reset() {
     stage_.Reset();
     // The machines reset, and the slots cleared with them.
     Apply(true);
-    trimFramesLeft_ = 0;
+    trimFramesLeft_ = gainLeft_ = 0;
 }
 
 int Engine::Sounding() const noexcept {
@@ -1138,8 +1148,12 @@ void Engine::Process(float* left, float* right, int frames) {
         for (int i = ramped; i < m; ++i)
             mix(i, static_cast<float>(trim_));
         decimator_.Process(bus_[0], bus_[1], n);
-        const float gain = static_cast<float>(gain_);
         for (int i = 0; i < n; ++i) {
+            float gain = static_cast<float>(gain_);
+            if (gainLeft_ > 0) {
+                --gainLeft_;
+                gain = static_cast<float>(gainFrom_ + gainStep_ * (kGainRampFrames - gainLeft_));
+            }
             std::array<float, 2> frame { bus_[0][i] * gain, bus_[1][i] * gain };
             stage_.Process(frame);
             left[i] = frame[0];
