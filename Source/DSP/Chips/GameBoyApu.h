@@ -11,14 +11,13 @@
 // Out() gives each channel's digital output (0-15), DacOn() whether its DAC
 // is on; the board turns those into analog levels (Boards/Handheld.h).
 //
-// Not modelled, because no source in hand states them: "zombie" volume
-// writes other than the consistent CGB-04 / $08 rules Pan Docs states.
 // A disabled channel's generators stand still until it is triggered again,
 // its frequency timer holding the count it stopped on.
 //
 // Reported additions (Lior Halphon's SameBoy, Expat/MIT license, read for the
-// timing rules it states, no code copied): CH3's 6-T-cycle trigger delay and
-// the 2-T-cycle DMG Wave RAM retrigger corruption window.
+// timing rules it states, no code copied): CH3's 6-T-cycle trigger delay,
+// the 2-T-cycle DMG Wave RAM retrigger corruption window, and the original's
+// "zombie" volume writes (Zombie).
 
 #include "Lfsr.h"
 #include "Timer.h"
@@ -373,8 +372,15 @@ private:
         }
     }
 
-    // Pan Docs, Obscure Behavior ("zombie" mode): CGB-04's consistent rules on
-    // CGB, and the universally consistent $x8 increment on DMG.
+    // An NRx2 write while the channel plays ("zombie" mode). On CGB, Pan
+    // Docs' (Obscure Behavior) CGB-04 rules. On DMG, SameBoy's (Core/apu.c,
+    // nrx2_glitch, for models up to CGB-C; reported): the write acts as two,
+    // the old value to $FF and then $FF to the new, each by one rule
+    // (ZombieStep). It keeps Pan Docs' $x8-on-$x8 increment, which SameBoy
+    // notes "always work[s] as expected", while "$x0 writes seem to be
+    // non-deterministic" on the original (README, Known gaps). SameBoy also
+    // reloads the step timer when the envelope's clock is high, a phase the
+    // envelope here does not model.
     static void Zombie(Model model, Envelope& e, std::uint8_t value) noexcept {
         if (model == Model::Cgb) {
             int v = e.volume;
@@ -385,10 +391,32 @@ private:
             if ((e.reg ^ value) & 8)
                 v = 16 - v;
             e.volume = static_cast<std::uint8_t>(v & 15);
-        } else if ((e.reg & 0x0F) == 0x08 && (value & 0x0F) == 0x08) {
-            e.volume = static_cast<std::uint8_t>((e.volume + 1) & 15);
+        } else {
+            const int v = ZombieStep(ZombieStep(e.volume, e.reg, 0xFF, e.halted), 0xFF, value, e.halted);
+            e.volume = static_cast<std::uint8_t>(v);
         }
         e.reg = value;
+    }
+
+    // One half of the original's zombie write, NRx2 from `from` to `to`:
+    // the volume counts one step in the new direction when a pace appears
+    // or $x8 meets $x8; a change of direction mirrors it instead (to 15 - v,
+    // or 14 - v, when climbing; to 16 - v when falling). A halted envelope
+    // (one that reached its end) does not count, and mirrors as if a pace
+    // had been there.
+    static int ZombieStep(int v, int from, int to, bool halted) noexcept {
+        bool tick = !halted && (((to & 7) && !(from & 7)) || ((to & 15) == 8 && (from & 15) == 8));
+        if ((to ^ from) & 8) {
+            if (to & 8) {
+                v = !(from & 7) && !halted ? 15 - v : 14 - v;
+                tick = false;
+            } else {
+                v = 16 - v;
+            }
+        }
+        if (tick)
+            v += (to & 8) ? 1 : -1;
+        return v & 15;
     }
 
     [[nodiscard]] bool NextStepClocksLength() const noexcept { return (divStep_ & 1) == 0; }

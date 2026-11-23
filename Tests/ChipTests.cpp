@@ -433,6 +433,39 @@ void TestGameBoy() {
         cgb.Run(20000, sink);
         Check(cgb.Out(0) == 13 || cgb.Out(0) == 0, "cgb zombie mode flip failed");
 
+        // The original's zombie writes, by SameBoy's rule (gb::Apu::Zombie),
+        // worked by hand: from 15, $08 on $F8 counts up to 0; $F0 on $x8
+        // mirrors to 15; $F0 on $x0 counts up to 0; $F8 on $x0 mirrors to
+        // 15; $F8 on $x8 counts up to 0. The volume is the most a 75 % duty
+        // pulse gives over a period (pace 0 throughout, so nothing else
+        // moves it).
+        {
+            gb::Apu z;
+            z.Reset(gb::Model::Dmg);
+            z.Write(0xFF26, 0x80, sink);
+            z.Write(0xFF11, 0xC0, sink);
+            z.Write(0xFF12, 0xF8, sink);
+            z.Write(0xFF13, 0x00, sink);
+            z.Write(0xFF14, 0x86, sink);
+            std::int64_t now = 0;
+            const auto volume = [&] {
+                int most = 0;
+                for (int i = 0; i < 64; ++i) {
+                    z.Run(now += 256, sink);
+                    most = std::max(most, z.Out(0));
+                }
+                return most;
+            };
+            Check(volume() == 15, "dmg zombie: the trigger's volume is not 15");
+            const std::pair<std::uint8_t, int> writes[] = { { 0x08, 0 }, { 0xF0, 15 }, { 0xF0, 0 }, { 0xF8, 15 }, { 0xF8, 0 } };
+            for (const auto& [value, expect] : writes) {
+                z.Write(0xFF12, value, sink);
+                const int got = volume();
+                Check(got == expect, "dmg zombie: $" + std::to_string(value) + " gives " + std::to_string(got) + ", not "
+                    + std::to_string(expect));
+            }
+        }
+
         gb::Apu dmg;
         dmg.Reset(gb::Model::Dmg);
         dmg.Write(0xFF26, 0x00, sink); // power off
