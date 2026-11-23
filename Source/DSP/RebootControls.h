@@ -163,4 +163,45 @@ struct Controls {
     double operator[](int index) const { return value[static_cast<std::size_t>(index)]; }
 };
 
+// The one Sound list a front end may show in place of Board, Expansion and
+// Part (owner, 2026-11-23): each sound is a board, the Console's cartridge
+// chip and one of the parts Machine::PartOf gives them, and every part the
+// machines offer is one sound. A cartridge's sound plays only on the Console
+// revision whose slot carries it (Console::kFamicom), so picking one picks
+// that revision too. Ours.
+struct SoundInfo {
+    const char* name;
+    int board, expansion, part;
+};
+
+inline constexpr int kCartridgeRevision = 1;
+
+inline constexpr std::array<SoundInfo, 12> kSounds { {
+    { "Handheld Pulse", 0, 0, 0 }, { "Handheld Wave", 0, 0, 1 }, { "Handheld Noise", 0, 0, 2 },
+    { "Console Pulse", 1, 0, 0 }, { "Console Triangle", 1, 0, 1 }, { "Console Noise", 1, 0, 2 },
+    { "A Pulse", 1, 1, 3 }, { "A Saw", 1, 1, 4 }, { "B Pulse", 1, 2, 3 },
+    { "C Wave", 1, 3, 3 }, { "D Disk", 1, 4, 3 }, { "E Square", 1, 5, 3 },
+} };
+
+// Writes sound `index` (clamped to the list) into c's Board, Expansion and
+// Part, and for a cartridge's sound its Revision; the other controls stay.
+inline void SetSound(Controls& c, int index) {
+    const SoundInfo& s = kSounds[static_cast<std::size_t>(index < 0 ? 0 : index >= static_cast<int>(kSounds.size())
+                                                                                ? static_cast<int>(kSounds.size()) - 1 : index)];
+    c[kBoard] = s.board;
+    c[kExpansion] = s.expansion;
+    c[kPart] = s.part;
+    if (s.expansion != 0)
+        c[kRevision] = kCartridgeRevision;
+}
+
+// The sound c's Board, Expansion and Part play, or -1 when they are none of
+// the list's (a cartridge plugged in under one of the Console's own parts).
+inline int SoundOf(const Controls& c) {
+    for (std::size_t i = 0; i < kSounds.size(); ++i)
+        if (kSounds[i].board == c[kBoard] && kSounds[i].expansion == c[kExpansion] && kSounds[i].part == c[kPart])
+            return static_cast<int>(i);
+    return -1;
+}
+
 } // namespace protocodus::reboot

@@ -246,6 +246,51 @@ void TestPresets() {
     }
 }
 
+// The Sound list: each sound plays the part its name says on its machine,
+// a cartridge's on the revision with the slot, and every part the machines
+// offer is one sound.
+void TestSounds() {
+    constexpr Voice kVoices[] = { Voice::Pulse, Voice::Wave, Voice::Noise, Voice::Pulse, Voice::Triangle, Voice::Noise,
+                                  Voice::Pulse, Voice::Saw, Voice::Pulse, Voice::Wave, Voice::ModWave, Voice::Tone };
+    static_assert(sizeof(kVoices) / sizeof(kVoices[0]) == kSounds.size(), "a voice a sound");
+    Check(kCartridgeRevision == Console::kFamicom, "sounds: the cartridge revision is not the slotted Console");
+    for (int i = 0; i < static_cast<int>(kSounds.size()); ++i) {
+        Controls c;
+        c[kRevision] = 2;
+        SetSound(c, i);
+        const std::string name = kSounds[static_cast<std::size_t>(i)].name;
+        Check(SoundOf(c) == i, name + ": SoundOf does not find it");
+        Check(c[kRevision] == (c[kExpansion] != 0 ? kCartridgeRevision : 2), name + ": wrong revision");
+        const auto e = Fresh(c);
+        const Machine& m = e->MachineAt(0);
+        const Part part = m.PartOf(static_cast<int>(c[kPart]));
+        Check(part.count > 0 && part.voice == kVoices[i] && m.Settings().expansion == c[kExpansion],
+              name + ": plays another part");
+    }
+    Controls low, high;
+    SetSound(low, -5);
+    SetSound(high, 99);
+    Check(SoundOf(low) == 0 && SoundOf(high) == static_cast<int>(kSounds.size()) - 1, "sounds: out of range not clamped");
+    // Every part: the boards' own without a cartridge, each cartridge's own.
+    int parts = 0;
+    for (int board = 0; board < 2; ++board)
+        for (int expansion = 0; expansion < (board ? Console::kCartridges : 1); ++expansion) {
+            Controls c;
+            c[kBoard] = board;
+            c[kRevision] = kCartridgeRevision;
+            c[kExpansion] = expansion;
+            const auto e = Fresh(c);
+            for (int index = expansion ? 3 : 0; index < (expansion ? Machine::kParts : 3); ++index)
+                if (e->MachineAt(0).PartOf(index).count > 0) {
+                    c[kPart] = index;
+                    Check(SoundOf(c) >= 0, "sounds: board " + std::to_string(board) + " expansion " + std::to_string(expansion)
+                                               + " part " + std::to_string(index) + " is not on the list");
+                    ++parts;
+                }
+        }
+    Check(parts == static_cast<int>(kSounds.size()), "sounds: the list and the machines' parts differ");
+}
+
 // One channel at full volume, a 50 % square, reads -24 dBFS RMS on both
 // boards, which the other parts are trimmed to (LevelTrims.h; every part
 // and shape is Reboot.Levels).
@@ -1750,6 +1795,7 @@ int main() {
     TestPartitionAndDeterminism();
     TestTrimAutomationPartition();
     TestPresets();
+    TestSounds();
     TestReferenceLevel();
     TestRates();
     TestKeyboard();

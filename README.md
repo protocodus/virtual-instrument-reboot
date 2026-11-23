@@ -50,7 +50,7 @@ WAVs are rendered and committed by hand after a change that alters them.
 
 ### 0.9.0 — 2026-11-23 — Glide with Sync, and a Volume that does not click
 
-One control joins, at the value that plays as 0.8.0 did. With Sync, Glide sync time makes Glide a note value at the song's tempo, as Arp rate and Vibrato rate already were: Off, or 1/64 to 1/1, which the glide covers in the driver's ticks nearest it. Volume, our trim after the machines, now moves over 64 samples when it changes, where it jumped at once and clicked. The chips' own steps are untouched: a volume register written, a note started or stopped, still steps the output as it did on the hardware.
+One control joins, at the value that plays as 0.8.0 did. With Sync, Glide sync time makes Glide a note value at the song's tempo, as Arp rate and Vibrato rate already were: Off, or 1/64 to 1/1, which the glide covers in the driver's ticks nearest it. Volume, our trim after the machines, now moves over 64 samples when it changes, where it jumped at once and clicked. The chips' own steps are untouched: a volume register written, a note started or stopped, still steps the output as it did on the hardware. Front ends get one Sound list to show in place of Board, Expansion and Part (`kSounds`, `SetSound`): every part the machines offer, a cartridge's on the Console revision with the slot.
 
 ### 0.8.0 — 2026-11-23 — Sync to the song's tempo
 
@@ -587,6 +587,11 @@ machine blackbox.
 
 The control ids, ranges and defaults are `Source/DSP/RebootControls.h`, which
 every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
+A front end may show one **Sound** list in place of Board, Expansion and Part
+(`kSounds`, written by `SetSound`; ours): Handheld Pulse, Wave and Noise,
+Console Pulse, Triangle and Noise, and the cartridges' A Pulse, A Saw,
+B Pulse, C Wave, D Disk and E Square, every part the machines offer once.
+A cartridge's sound picks the Console revision whose slot carries it.
 
 ## Known gaps
 
