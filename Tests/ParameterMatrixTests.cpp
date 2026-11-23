@@ -8,6 +8,7 @@
 #include "DSP/RebootPresets.h"
 #include "ParameterMatrix.h"
 
+#include <cmath>
 #include <cstring>
 #include <memory>
 
@@ -255,7 +256,11 @@ private:
         const bool exists = board == 0
             ? part < 3
             : part < 3 || (revision == 1 && ((part == 3 && expansion != 0) || (part == 4 && expansion == 1)));
-        return exists && c[kAttack] < 10.0 && c[kLevel] >= 12.0 && c[kSustain] >= 10.0;
+        // A sweep on the console's pulses runs their period out of range,
+        // under 8 or past $7FF, where the APU mutes them (APU Sweep), as
+        // the chip does; the handheld's sweeps only its first pulse.
+        const bool swept = board == 1 && part == 0 && static_cast<int>(std::lround(c[kSweep])) != 0;
+        return exists && !swept && c[kAttack] < 10.0 && c[kLevel] >= 12.0 && c[kSustain] >= 10.0;
     }
 
     void Apply() {

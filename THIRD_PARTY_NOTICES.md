@@ -14,7 +14,8 @@ that uses it.
 - SameBoy (Lior Halphon, Expat/MIT licence,
   [ThirdParty/sameboy-LICENSE.txt](ThirdParty/sameboy-LICENSE.txt)): read for the
   hardware timing and analog decay rules it documents (CH3 6-T-cycle trigger
-  delay, 2-T-cycle DMG Wave RAM retrigger corruption window, and 50 us DAC
+  delay, 2-T-cycle DMG Wave RAM retrigger corruption window, the DMG's
+  zombie-mode `NRx2` writes (`Core/apu.c`, `nrx2_glitch`), and 50 us DAC
   turn-off decay in `Source/DSP/Chips/GameBoyApu.h` and
   `Source/DSP/Boards/Handheld.h`). No code is copied.
 - The NESdev Wiki: the APU pages, "APU Mixer", "Cycle reference chart",

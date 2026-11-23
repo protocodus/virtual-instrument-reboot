@@ -48,6 +48,12 @@ WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
 
+### 0.7.0 — 2026-11-23 — the chips' own envelopes, sweeps and sides
+
+Five controls join, each at the value that plays as 0.6.0 did. Envelope Chip hands a note's volume to its channel's own envelope unit: the trigger starts it and the chip steps it, where the driver wrote every step before. It plays the handheld's pulses and noise (climbing, or falling from the Level), the console's and the MMC5's pulses and the console's noise (falling from 15), the disk unit's gain (up to 32, or down from the Level) and the 5B's one envelope, which the newest note takes. Its paces are the nearest to Attack, Decay and Release, and it runs on past Sustain to 0, as a unit does; Envelope Loop lets the console's, the MMC5's and the 5B's fall again and again. Sweep and Sweep pace play the pitch sweeps of the handheld's first pulse and the console's two pulses from each note's start. Sides puts the handheld's first pulse on the left and its second on the right. Load plays the handheld's Line into 32 Ohm headphones, whose socket adds a high-pass near 50 Hz.
+
+The original handheld's volume writes while a channel plays (zombie mode) now follow SameBoy's reported rule for every value, where only `$08` did before.
+
 ### 0.6.0 — 2026-11-23 — two real units, each on its own frames
 
 Every machine is now a unit of its own: its own crystal, the moment it was switched on, and its own output level and filter corners within its parts' tolerances. Its sound driver counts frames from its own power-on, so two units' envelope and vibrato steps fall at their own moments. Double is two units of the same board set up the same and given the same notes, the first on the left and the second on the right: their differences are the stereo, and Detune pulls the two crystals apart, moving the whole unit rather than its period steps. A held note on the second unit is not a copy of the first.
@@ -266,7 +272,7 @@ reviewed, including the 0.5.1 pulse-sequencer audit, is in the
 
 ### The handheld (Game Boy, Game Boy Color)
 
-- **Chip (spec, CH3 delay & DMG corruption window reported):** Pan Docs
+- **Chip (spec; CH3 delay, DMG corruption window and DMG zombie writes reported):** Pan Docs
   (CC0): two pulses with four duties, the first with its period sweep, a
   32-sample 4-bit wave channel, a noise channel with its 15- and 7-bit LFSR,
   length counters, volume envelopes and the 512 Hz frame sequencer on the gbdev
@@ -274,10 +280,13 @@ reviewed, including the 0.5.1 pulse-sequencer audit, is in the
   first trigger plays as 0, duty position survives a trigger, pulse triggers
   keep the low two bits of the frequency timer, wave triggers play the previous
   sample buffer's high nibble before index 1, active CH3 Wave RAM writes/reads
-  are locked (DMG 2-T-cycle window) or redirected (CGB), CGB-04/DMG zombie
-  volume writes (`NRx2`), DMG `NR52=0` length preservation, and SameBoy-reported
-  CH3 6-T-cycle trigger delay and 2-T-cycle DMG Wave RAM retrigger corruption
-  window. Revisions: the original (DMG) and the Color (CGB).
+  are locked (DMG 2-T-cycle window) or redirected (CGB), CGB-04's zombie
+  volume writes (`NRx2` while a channel plays), DMG `NR52=0` length
+  preservation, and, reported from SameBoy (Expat), CH3's 6-T-cycle trigger
+  delay, the 2-T-cycle DMG Wave RAM retrigger corruption window and the
+  original's zombie writes: each acts as two, the old value to `$FF` and then
+  `$FF` to the new, counting the volume a step when a pace appears or `$x8`
+  meets `$x8` and mirroring it when the direction turns. Revisions: the original (DMG) and the Color (CGB).
 - **DACs and mixer (spec, 50 us decay reported):** a DAC on maps 0 to 15 to
   analog +1 to -1, off decays toward 0 over 50 us on Line; NR51 sends channels
   to each side and NR50 scales the sides.
@@ -292,8 +301,13 @@ reviewed, including the 0.5.1 pulse-sequencer audit, is in the
   after it, the amplifier, which Ken Shirriff's die analysis of the Color's
   IR3R53N says has "an external feedback capacitor, which causes it to act
   as a high-pass filter". Pan Docs' single 706 Hz pole for the Color fits
-  neither. The amplifier's gain, the headphone socket and the speaker are
-  not modelled.
+  neither. Those recordings are the socket into a line input, where its
+  coupling capacitor's corner is under 1 Hz. **Load** Headphones adds that
+  capacitor into its load: 100 uF (the original's headphone board's C1 and
+  C2, in repair kits' parts lists; reported; the Color's taken as the same,
+  sibling) into 32 Ohm with nothing in series (estimate), a high-pass at
+  49.7 Hz. The amplifier's gain and clipping and the speaker are not
+  modelled.
 
 ### The console (NES, Famicom, PAL NES)
 
@@ -449,6 +463,39 @@ machine blackbox.
   notes keep their envelope; each Arp step starts it again, unless Arp
   retrigger is off (LSDj keeps the two apart: its chord command moves the
   pitch, and a retrigger is another command).
+- **The chips' own envelopes.** **Envelope** Chip hands a note's volume to
+  its channel's envelope unit where it has one, and the trigger starts it:
+  the handheld's pulses and noise (`NRx2`, a step every 1 to 7 64ths of a
+  second, climbing or falling from the volume written); the console's pulses
+  and noise and the MMC5's pulses (`$4000` bit 4 clear, falling from 15 every
+  1 to 16 quarter frames, or of the MMC5's 241 Hz ticks); the disk unit's
+  gain (`$4080` bit 7 clear, a step every 8 × 233 cycles times 1 to 64, up
+  to 32 or down to 0 from the gain written); and the 5B's envelope
+  (`R11`–`R13`, two of its 32 steps a volume step, falling once, climbing
+  once or falling again and again from its top). A note with an Attack
+  climbs from 0 to the top where the unit can climb; else it falls from its
+  start at the pace nearest the step the driver's Decay would take, and runs
+  on past Sustain to 0, since a unit stops only at an end; at Sustain 15 the
+  driver holds the level. Release retriggers a falling unit from where the
+  driver counts it (the handheld's and the disk unit's), lets the console's
+  run on to 0, and takes a climbing or looping note back to the driver's
+  steps. **Loop** (Envelope's third setting) lets the console's, the MMC5's
+  and the 5B's fall again and again. The 5B has one envelope for its three
+  channels: the newest note takes it, and the notes it played go on under
+  the driver from where they were. A note handed to a channel without a
+  unit (a fallback) goes back to the driver, and changing Envelope plays the
+  held keys again. The mapping of times to paces is ours; the driver counts
+  the unit's steps from the trigger, which can be a step from the chip's own.
+- **Sweeps and sides.** **Sweep** writes the pitch sweep of the handheld's
+  first pulse (`NR10`, every 1 to 7 128ths of a second; Sweep pace 8 plays
+  as 7) and the console's pulses (`$4001`, every 1 to 8 half frames) before
+  each note's trigger: + raises the pitch and − lowers it, a step's size 8
+  minus the shift. The driver then leaves the swept pulse's period to the
+  sweep, so vibrato, glide and the wheel do not reach it, and a sweep that
+  runs out of range turns the handheld's channel off or mutes the console's,
+  as the chips do. **Sides** Spread writes `NR51` so the handheld's first
+  pulse plays on the left only and its second on the right only, the wave
+  and noise on both.
 - **Voices.** One voice plays up to eight machines of one board
   (**Boards**), with its revision, expansion, bias and path. A note takes
   the free channel of the part, on any of the machines, that was freed
@@ -502,6 +549,10 @@ machine blackbox.
 | Arp order | Up, Down, Up and down, As played | the arpeggio's order |
 | Arp retrigger | Off, On | whether each arpeggio step starts the envelope again |
 | Driver rate | 1 to 8 ticks | the driver's ticks a video frame |
+| Envelope | Driver, Chip, Loop | who steps the volume: the driver each tick, or the channel's own envelope unit from its trigger, looping where the unit can |
+| Sweep, Sweep pace | -7 to 7; 1 to 8 | the pulses' pitch sweep from each note's start (+ up, − down, a step's size 8 minus the shift), and its steps apart |
+| Sides | Both, Spread | the handheld's channels on both sides, or its first pulse left and its second right |
+| Load | Line input, Headphones | what the handheld's socket drives on Line |
 | Oversampling | 1x, 2x, 4x, 8x | setup, not a control: the machines' rate over the host's (`Engine::Prepare`) |
 
 The control ids, ranges and defaults are `Source/DSP/RebootControls.h`, which
@@ -510,17 +561,18 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
 ## Known gaps
 
 - **Analog stages without a source are not modelled.** The handheld's
-  amplifier, headphone socket and speaker. What is published of them gives
-  topologies, not a model: the original handheld's headphone socket couples
-  through 100 uF, whose corner is the load's (about 50 Hz into 32 Ohm
-  headphones, under 1 Hz into a line input); the amplifier's gain and
-  clipping point are not published.
-- **The handheld.** Non-`$08` DMG zombie writes remain unmodelled (CGB-04's
-  consistent rules and `$08` on DMG are implemented), and CH3's 6-T-cycle
-  trigger delay, 2-T-cycle DMG Wave RAM retrigger corruption window, and 50 us
-  DAC-off decay are reported from SameBoy (Expat/MIT) rather than our own
-  hardware capture; Pan Docs notes that DAC decay varies between handheld
-  models. The Color's corners are one unit's,
+  amplifier and speaker: the amplifier's gain and clipping point are not
+  published, and neither is anything of the speaker's response. Load's
+  headphones are an estimate, 32 Ohm with nothing in series, on the
+  original's 100 uF (reported from repair kits' parts lists, not a traced
+  drawing); the Color's socket is taken as the original's (sibling).
+- **The handheld.** The original's zombie writes, CH3's 6-T-cycle
+  trigger delay, the 2-T-cycle DMG Wave RAM retrigger corruption window and
+  the 50 us DAC-off decay are reported from SameBoy (Expat/MIT) rather than
+  our own hardware capture. SameBoy notes that `$x0` zombie writes "seem to
+  be non-deterministic" on the original, and it also reloads the envelope's
+  step timer when its clock is high, a phase our envelope does not model;
+  Pan Docs notes that DAC decay varies between handheld models. The Color's corners are one unit's,
   read from a published picture of its waveform rather than from its
   samples, and fits within 20 % of the best error span 132 to 216 Hz and
   36 to 66 Hz; neither capacitor's value is published. The same recordings
@@ -570,11 +622,13 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
   warm-ups are ours. Detune's pull reaches 25 cents, 1.5 %, which no
   crystal's trimmer reaches: it stands for a unit built on another
   crystal.
-- **The chips' own envelopes, sweeps and the handheld's sides are not
-  played yet.** The driver writes every volume step itself, as console
-  drivers did; the handheld's `NRx2` envelope, both machines' pitch sweeps
-  and the handheld's `NR51` left and right routing are emulated in the
-  cores but no control reaches them.
+- **The chips' own envelopes, as the driver keeps them.** Envelope Chip's
+  paces, its decay past Sustain to 0, its releases and the 5B's envelope
+  going to the newest note are ours. The driver counts a unit's steps from
+  its trigger, which can be a step from the chip's own sequencer, and
+  decides from that count when a note has ended. The VRC6's and the 163's
+  channels, the triangle and the handheld's wave channel have no envelope
+  unit and stay under the driver.
 - **The level trims' limits.** The trims match a part's single notes, at
   full level with Bias 0 and Mod 0, by K-weighted loudness; whether that or
   plain RMS (Reason's meter) is the better match for these tones has not

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Reboot VERSION 0.6.0 LANGUAGES CXX)
+project(Reboot VERSION 0.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
