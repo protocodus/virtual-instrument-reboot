@@ -377,11 +377,16 @@ void TestOversampling() {
     }
 }
 
-// Double: a second set of machines mirrors every note, the first set on the
-// left and the second on the right, each half the detune off the note.
+// Double: a second set of units of the same board plays every note, the
+// first set on the left and the second on the right, each set's crystal
+// half the detune off its own.
 void TestDouble() {
-    // With no detune each side is one set's own sound, bit for bit, on
-    // every board, through bends, vibrato, the pedal and releases.
+    // The owner's Double (2026-11-18) is two devices of the same kind set up
+    // the same, whose natural differences make the stereo. Until 0.6.0 this
+    // held each side to the single set bit for bit; now, with no detune, the
+    // left is still the single set's sound bit for bit, and the right is
+    // another unit's: not a copy, but the same note within its crystal's
+    // ppm and its parts' tolerances (Boards/Board.h, UnitSpread).
     for (int board = 0; board < 2; ++board) {
         Controls c;
         c[kBoard] = board;
@@ -390,11 +395,23 @@ void TestDouble() {
         c[kDetune] = 0;
         const Audio two = Play(*Fresh(c), Phrase(), 96000);
         Check(one.left == one.right, "board " + std::to_string(board) + " is not centred");
-        Check(two.left == one.left && two.right == one.left,
-              "board " + std::to_string(board) + ": Double with no detune is not the single set on both sides");
+        Check(two.left == one.left, "board " + std::to_string(board) + ": Double's first set is not the single set");
+        Check(two.right != two.left, "board " + std::to_string(board) + ": Double's second unit is a copy of the first");
+        Controls held = Plain(board);
+        held[kDouble] = 1;
+        held[kDetune] = 0;
+        const Audio a = Play(*Fresh(held), { On(0, 57) }, 48000);
+        const double left = Measure(a.left, 220.0, 48000.0, 9600, 48000), right = Measure(a.right, 220.0, 48000.0, 9600, 48000);
+        const double level = Rms(a.right, 9600, 48000) / Rms(a.left, 9600, 48000);
+        Check(std::fabs(Cents(right, left)) < 0.1, "board " + std::to_string(board) + ": Double's units play A3 "
+              + std::to_string(Cents(right, left)) + " cents apart with no detune");
+        Check(level > 0.85 && level < 1.15, "board " + std::to_string(board) + ": Double's units differ in level by "
+              + std::to_string(level));
     }
     // A3's period on the handheld moves 2.9 cents a step, so each side sits
-    // within 3 cents of its half of a 20 cent detune.
+    // within 3 cents of its half of a 20 cent detune; the crystals' pull
+    // moves the whole unit, not its period steps, so the sides lie the
+    // detune apart.
     Controls c = Plain(0);
     c[kDouble] = 1;
     c[kDetune] = 20;
@@ -403,6 +420,26 @@ void TestDouble() {
     const double left = Measure(a.left, a3, 48000.0, 9600, 48000), right = Measure(a.right, a3, 48000.0, 9600, 48000);
     Check(std::fabs(Cents(left, a3) + 10.0) < 3.0, "Double's left plays A3 at " + std::to_string(Cents(left, a3)) + " cents");
     Check(std::fabs(Cents(right, a3) - 10.0) < 3.0, "Double's right plays A3 at " + std::to_string(Cents(right, a3)) + " cents");
+    Check(std::fabs(Cents(right, left) - 20.0) < 0.2, "Double's sides lie " + std::to_string(Cents(right, left)) + " cents apart, not 20");
+    // Each unit's driver steps on its own frame, counted from its own
+    // power-on: on the console, a slow attack's first audible step comes
+    // on the left a frame from the key and on the right at the second
+    // unit's next frame, 16 ms before (it was switched on at another moment).
+    {
+        Controls slow = Plain(1);
+        slow[kAttack] = 300;
+        slow[kDouble] = 1;
+        slow[kDetune] = 0;
+        const Audio s = Play(*Fresh(slow), { On(0, 57) }, 4800);
+        const auto onset = [](const std::vector<float>& x) {
+            std::size_t i = 0;
+            while (i < x.size() && std::fabs(x[i]) < 1.0e-4f)
+                ++i;
+            return static_cast<int>(i);
+        };
+        Check(std::abs(onset(s.left) - onset(s.right)) > 48, "Double's units step their envelopes on one frame: "
+              + std::to_string(onset(s.left)) + " and " + std::to_string(onset(s.right)));
+    }
     // Turned on under a held key, Double plays it on both sides; after the
     // key, both sides fall silent.
     Controls single = Plain(0);

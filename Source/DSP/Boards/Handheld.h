@@ -53,11 +53,26 @@ public:
     static constexpr double kFrameHz = 4194304.0 / 70224.0; // the LCD's 59.73 Hz
     static constexpr std::int64_t kFrameCycles = 70224;
 
-    void Prepare(int sampleRate) {
+    // Between two units. The crystal (Pan Docs, Specifications, read
+    // 2026-11-18; reported): "Real DMG units tend to run about 50-70 PPM
+    // slow. Accuracy of other models is unknown." So units lie 20 ppm apart:
+    // 10 ppm either side of the nominal unit (ours: the nominal unit keeps
+    // the documents' 4194304 Hz; sibling for the Color). The warm-up is up
+    // to a second (ours: only where it leaves the unit's dividers and its
+    // video frame matters). The level, 5 %, and the corners, 10 %, are what
+    // 5 % resistors and 10 % capacitors around the amplifier would give
+    // (estimate; README, Known gaps).
+    static constexpr UnitSpread kSpread { 1000, 4194304, 0.05, 0.10 };
+
+    // Setup, for the unit with these traits (Board.h).
+    void Prepare(int sampleRate, const UnitTraits& traits = {}) {
         rate_ = sampleRate;
-        capacitorDesign_[kOriginal].Design(0.999958, sampleRate);
-        capacitorDesign_[kColor].Design(kColorCapacitor, sampleRate);
-        colorHighPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::HighPass, 176.0, sampleRate);
+        traits_ = traits;
+        // A corner moves with its capacitor: 1 - factor is the corner's
+        // measure (kColorCapacitor).
+        capacitorDesign_[kOriginal].Design(1.0 - (1.0 - 0.999958) * traits.corner, sampleRate);
+        capacitorDesign_[kColor].Design(1.0 - (1.0 - kColorCapacitor) * traits.corner, sampleRate);
+        colorHighPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::HighPass, 176.0 * traits.corner, sampleRate);
         DesignPinBlocker(pinBlocker_[0], sampleRate);
         DesignPinBlocker(pinBlocker_[1], sampleRate);
         // Reported: SameBoy (MIT, Core/apu.c) models pre-GBA physical DAC
@@ -66,10 +81,12 @@ public:
         dacFadeFactor_ = std::exp(-1.0 / (kDacFadeSeconds * static_cast<double>(sampleRate)));
     }
 
-    void Reset(int revision) noexcept {
+    // Switched on: the chip as power leaves it, nothing written yet. The
+    // unit's crystal runs `trim` (Timebase's units) off its own frequency.
+    void Reset(int revision, std::int64_t trim = 0) noexcept {
         revision_ = revision;
         apu_.Reset(revision == kColor ? gb::Model::Cgb : gb::Model::Dmg);
-        tb_.Set(gb::kClock, 1, rate_);
+        tb_.Set(gb::kClock, 1, rate_, traits_.clock + trim);
         mix_.Clear();
         dacOff_[0].Clear();
         dacOff_[1].Clear();
@@ -108,19 +125,15 @@ public:
 
     [[nodiscard]] std::uint8_t Read(std::uint16_t address) noexcept { return apu_.Read(address); }
 
-    // Drains initial driver boot writes, settles the output stages on any
-    // resting bias, and aligns the sample block origin to the current cycle.
+    // Ours: a unit is heard as one that has stood since its driver's start,
+    // not as one switched on that moment. Delivers the boot's writes, runs
+    // the unit's warm-up with every step landing at once, settles the output
+    // stages on the level that leaves, and starts the sample block there.
     void FinishBoot() noexcept {
-        if (!bus_.Empty()) {
-            const auto end = bus_.LastCycle() + 1;
-            // Keep even a long initialization sequence inside the sample buffer.
-            // The host starts listening only after FinishBoot settles the filters.
-            while (end > tb_.CycleAt(StepBuffer::kMaxFrames)) {
-                float discard[StepBuffer::kMaxFrames] {};
-                Render(StepBuffer::kMaxFrames, Path::Pin, discard, discard);
-            }
-            RunTo(end);
-        }
+        settling_ = true;
+        const std::int64_t end = bus_.Empty() ? 0 : bus_.LastCycle() + 1;
+        RunTo(end > traits_.warmUp ? end : traits_.warmUp);
+        settling_ = false;
         const double left = mix_.Land(0);
         const double right = mix_.Land(1);
         pinBlocker_[0].Settle(left);
@@ -132,12 +145,23 @@ public:
             dacOff_[s].Clear();
             dacResidual_[s] = 0.0;
         }
-        tb_.SetAt(apu_.Now(), gb::kClock, 1, rate_);
+        tb_.Restart(apu_.Now());
         bus_.ResetTiming(apu_.Now());
     }
 
     [[nodiscard]] std::int64_t CycleAt(int frame) const noexcept { return tb_.CycleAt(frame); }
     [[nodiscard]] std::int64_t Now() const noexcept { return apu_.Now(); }
+    // Where a cycle of this block falls in it, in the step buffer's
+    // positions, and the first cycle at or after such a position: how one
+    // unit's moment is found on another's clock.
+    [[nodiscard]] std::int64_t Position(std::int64_t cycle) const noexcept {
+        return settling_ ? 0 : tb_.Position(cycle, StepBuffer::kSubBits);
+    }
+    [[nodiscard]] std::int64_t CycleAtPosition(std::int64_t position) const noexcept {
+        return tb_.CycleAtPosition(position, StepBuffer::kSubBits);
+    }
+    // A trimmer on the unit's crystal, turned at the block's start.
+    void SetTrim(std::int64_t trim) noexcept { tb_.Trim(traits_.clock + trim); }
 
     void RunTo(std::int64_t cycle) {
         Sink sink { this };
@@ -190,7 +214,7 @@ private:
                 }
                 const double pin = pinBlocker_[side].Process(bus[side][i]);
                 const double line = amplifier_[side].Process(capacitor_[side].Process(in));
-                out[side][i] += static_cast<float>(path == Path::Line ? line : pin);
+                out[side][i] += static_cast<float>((path == Path::Line ? line : pin) * traits_.level);
             }
         }
     }
@@ -206,7 +230,7 @@ private:
     }
 
     void Changed(std::int64_t cycle) noexcept {
-        const std::int64_t position = tb_.Position(cycle, StepBuffer::kSubBits);
+        const std::int64_t position = Position(cycle);
         const std::uint8_t nr51 = apu_.Panning();
         const std::uint8_t nr50 = apu_.MasterVolume();
         // NR50: bits 6-4 left, 2-0 right; (volume + 1) / 8.
@@ -241,6 +265,8 @@ private:
 
     int rate_ = 48000;
     int revision_ = kOriginal;
+    UnitTraits traits_;
+    bool settling_ = false;   // FinishBoot: every step lands at the block's start
     gb::Apu apu_;
     Timebase tb_;
     BusWriteQueue<> bus_;

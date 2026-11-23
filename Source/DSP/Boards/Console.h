@@ -97,6 +97,18 @@ public:
     enum Cartridge { kNone, kVrc6, kMmc5, kN163, kFds, k5B, kCartridges };
     static constexpr double kPulse15 = 95.88 / (8128.0 / 15.0 + 100.0);
 
+    // Between two units. The crystal (NESdev Wiki, "Cycle reference chart",
+    // read 2026-11-18; reported): the master clock is "21.477272 MHz ± 40 Hz"
+    // on NTSC and "26.601712 MHz ± 50 Hz" on PAL, 1.9 ppm either way. The
+    // warm-up is up to 262144 cycles (ours: only where it leaves the unit's
+    // video frame, its dividers and its noise register matters, and that
+    // is eight frames and twice round the register's 32767 steps at the 4
+    // cycles a step it runs at from power-on). Brad Smith's DAC
+    // measurements above found "variance between units" and give no
+    // figure: the level, 5 %, and the corners, 10 %, are what 5 % resistors
+    // and 10 % capacitors would give (estimate; README, Known gaps).
+    static constexpr UnitSpread kSpread { 190, 262144, 0.05, 0.10 };
+
     // The cartridge's compression curve does not depend on the sample rate
     // or board. An engine prepares it once for all its machines.
     using Curve5B = std::array<double, kCurveSteps + 1>;
@@ -109,11 +121,15 @@ public:
 
     void Prepare(int sampleRate) { Prepare(sampleRate, Make5BCurve()); }
 
-    void Prepare(int sampleRate, const Curve5B& levels) {
+    // Setup, for the unit with these traits (Board.h): every corner of its
+    // output stage and of the cartridges it plays is its own.
+    void Prepare(int sampleRate, const Curve5B& levels, const UnitTraits& traits = {}) {
         curve5B_ = levels;
-        frontHighPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::HighPass, 90.0, sampleRate);
-        famicomHighPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::HighPass, 37.0, sampleRate);
-        frontLowPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::LowPass, 14000.0, sampleRate);
+        traits_ = traits;
+        const double corner = traits.corner;
+        frontHighPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::HighPass, 90.0 * corner, sampleRate);
+        famicomHighPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::HighPass, 37.0 * corner, sampleRate);
+        frontLowPass_ = FirstOrder::ComputeCoefficients(FirstOrder::Kind::LowPass, 14000.0 * corner, sampleRate);
         rate_ = sampleRate;
         DesignPinBlocker(pinBlocker_, sampleRate);
         // Reported: NESdev "FDS audio" (~2 kHz RC low-pass) + Yuri213212's
@@ -121,22 +137,24 @@ public:
         // (~12k, 8k, 6k, 4.8k -> corner scales proportionally to 2, 3, 4, 5 kHz).
         static constexpr double kFdsCornerHz[4] = { 2000.0, 3000.0, 4000.0, 5000.0 };
         for (int m = 0; m < 4; ++m)
-            fdsLowPassCoeffs_[m] = FirstOrder::ComputeCoefficients(FirstOrder::Kind::LowPass, kFdsCornerHz[m], sampleRate);
+            fdsLowPassCoeffs_[m] = FirstOrder::ComputeCoefficients(FirstOrder::Kind::LowPass, kFdsCornerHz[m] * corner, sampleRate);
         fdsLowPass_.SetCoefficients(FirstOrder::Kind::LowPass, fdsLowPassCoeffs_[0]);
-        mmc5Board_.Design(FirstOrder::Kind::HighPass, 1.0 / (2.0 * 3.141592653589793 * 15000.0 * 100e-9), sampleRate);
-        s5bApuIn_.Design(FirstOrder::Kind::HighPass, 12.0, sampleRate);
-        s5bInternal_.Design(FirstOrder::Kind::HighPass, 20.0, sampleRate);
-        s5bOut_.Design(FirstOrder::Kind::HighPass, 12.0, sampleRate);
+        mmc5Board_.Design(FirstOrder::Kind::HighPass, corner / (2.0 * 3.141592653589793 * 15000.0 * 100e-9), sampleRate);
+        s5bApuIn_.Design(FirstOrder::Kind::HighPass, 12.0 * corner, sampleRate);
+        s5bInternal_.Design(FirstOrder::Kind::HighPass, 20.0 * corner, sampleRate);
+        s5bOut_.Design(FirstOrder::Kind::HighPass, 12.0 * corner, sampleRate);
     }
 
-    void Reset(int revision, int cartridge) noexcept {
+    // Switched on: the chips as power leaves them, nothing written yet. The
+    // unit's crystal runs `trim` (Timebase's units) off its own frequency.
+    void Reset(int revision, int cartridge, std::int64_t trim = 0) noexcept {
         revision_ = revision;
         cartridge_ = revision == kFamicom ? cartridge : kNone;
         const nes::Region region = revision == kPal ? nes::Region::Pal : nes::Region::Ntsc;
         apu_.Reset(region);
         const nes::Clock clock = nes::kCpuClock[revision == kPal ? 1 : 0];
         cpuHz_ = static_cast<double>(clock.numerator) / static_cast<double>(clock.denominator);
-        tb_.Set(clock.numerator, clock.denominator, rate_);
+        tb_.Set(clock.numerator, clock.denominator, rate_, traits_.clock + trim);
         mix_.Clear();
         bus_.Clear();
         pinBlocker_.Reset();
@@ -192,29 +210,35 @@ public:
         return 0xFF;
     }
 
-    // Drains initial driver boot writes, settles the output stages on the
-    // resulting rest levels (the triangle's held first step and the DMC's Bias),
-    // and aligns the sample block origin to the current cycle.
+    // Ours: a unit is heard as one that has stood since its driver's start.
+    // Delivers the boot's writes, runs the unit's warm-up with every step
+    // landing at once, settles the output stages on the rest levels that
+    // leaves (the triangle's held step and the DMC's Bias), and starts the
+    // sample block there.
     void FinishBoot() noexcept {
-        if (!bus_.Empty()) {
-            const auto end = bus_.LastCycle() + 1;
-            // Keep even a long initialization sequence inside the sample buffer.
-            // The host starts listening only after FinishBoot settles the filters.
-            while (end > tb_.CycleAt(StepBuffer::kMaxFrames)) {
-                float discard[StepBuffer::kMaxFrames] {};
-                Render(StepBuffer::kMaxFrames, Path::Pin, discard, discard);
-            }
-            RunTo(end);
-        }
+        settling_ = true;
+        const std::int64_t end = bus_.Empty() ? 0 : bus_.LastCycle() + 1;
+        RunTo(end > traits_.warmUp ? end : traits_.warmUp);
+        settling_ = false;
         SettleOutputStages();
-        const nes::Clock clock = nes::kCpuClock[revision_ == kPal ? 1 : 0];
-        tb_.SetAt(apu_.Now(), clock.numerator, clock.denominator, rate_);
+        tb_.Restart(apu_.Now());
         bus_.ResetTiming(apu_.Now());
     }
 
     [[nodiscard]] std::int64_t CycleAt(int frame) const noexcept { return tb_.CycleAt(frame); }
     [[nodiscard]] double CpuHz() const noexcept { return cpuHz_; }
     [[nodiscard]] std::int64_t Now() const noexcept { return apu_.Now(); }
+    // Where a cycle of this block falls in it, in the step buffer's
+    // positions, and the first cycle at or after such a position: how one
+    // unit's moment is found on another's clock.
+    [[nodiscard]] std::int64_t Position(std::int64_t cycle) const noexcept {
+        return settling_ ? 0 : tb_.Position(cycle, StepBuffer::kSubBits);
+    }
+    [[nodiscard]] std::int64_t CycleAtPosition(std::int64_t position) const noexcept {
+        return tb_.CycleAtPosition(position, StepBuffer::kSubBits);
+    }
+    // A trimmer on the unit's crystal, turned at the block's start.
+    void SetTrim(std::int64_t trim) noexcept { tb_.Trim(traits_.clock + trim); }
 
     void RunTo(std::int64_t cycle) {
         Sink sink { this };
@@ -250,7 +274,7 @@ public:
             else if (cartridge_ == k5B)
                 lineIn = s5bOut_.Process(Amplify5B(s5bApuIn_.Process(bus[0][i]) + s5bInternal_.Process(cart)));
             const double line = lowPass_.Process(highPass_.Process(lineIn));
-            const float output = static_cast<float>(path == Path::Line ? line : pin);
+            const float output = static_cast<float>((path == Path::Line ? line : pin) * traits_.level);
             left[i] += output;
             right[i] += output;
         }
@@ -358,11 +382,11 @@ private:
         if (tnd > 0.0)
             level += 159.79 / (1.0 / tnd + 100.0);
         const float levels[2] = { static_cast<float>(level), 0.0f };
-        mix_.Set(0, tb_.Position(cycle, StepBuffer::kSubBits), levels);
+        mix_.Set(0, Position(cycle), levels);
     }
 
     void CartChanged(std::int64_t cycle) noexcept {
-        const std::int64_t position = tb_.Position(cycle, StepBuffer::kSubBits);
+        const std::int64_t position = Position(cycle);
         double level = 0.0;
         int bus = 0;
         switch (cartridge_) {
@@ -446,6 +470,8 @@ private:
     }
 
     int rate_ = 48000;
+    UnitTraits traits_;
+    bool settling_ = false;   // FinishBoot: every step lands at the block's start
     int revision_ = kFrontLoader;
     int cartridge_ = kNone;
     double cpuHz_ = 19687500.0 / 11.0;

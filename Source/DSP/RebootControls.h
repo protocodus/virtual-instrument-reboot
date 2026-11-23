@@ -47,8 +47,8 @@ enum Control : int {
     kBendRange,         // semitones the pitch wheel bends either way
     kVelocity,          // 0 every note at the level .. 1 level times velocity
     // The output.
-    kDouble,            // 0 one set of machines; 1 a second set too, the first left and the second right
-    kDetune,            // cents between the two sets with Double, half of it either way
+    kDouble,            // 0 one set of units; 1 a second set of the same board too, the first left and the second right
+    kDetune,            // cents the two sets' crystals are pulled apart with Double, half of it either way
     kVolume,            // output level, dB: our trim after the machines (README, How it works)
     kControlCount
 };

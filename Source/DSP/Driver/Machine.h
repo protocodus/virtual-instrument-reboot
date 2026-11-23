@@ -1,9 +1,10 @@
 #pragma once
 
-// One machine of the chosen board together with its sound driver, behind the
+// One unit of the chosen board together with its sound driver, behind the
 // one interface the playing layer uses. Every board type is built and prepared
 // up front, so choosing another board only resets it: nothing is allocated
-// while playing.
+// while playing. A machine is always the same unit of each board: the one
+// with the serial number it was prepared with (Board.h, DrawTraits).
 //
 // A part is what the voice plays: a run of the board's channels and the voice
 // it plays on them. Keys a part cannot reach go to its board's fallback part
@@ -43,27 +44,36 @@ public:
     static constexpr int kMaxChannels = ConsoleDriver::kMaxChannels;
     static constexpr int kParts = 5;
 
-    void Prepare(int sampleRate) { Prepare(sampleRate, Console::Make5BCurve()); }
+    void Prepare(int sampleRate, int serial = 0) { Prepare(sampleRate, Console::Make5BCurve(), serial); }
 
-    void Prepare(int sampleRate, const Console::Curve5B& levels) {
-        handheld_.Prepare(sampleRate);
-        console_.Prepare(sampleRate, levels);
+    void Prepare(int sampleRate, const Console::Curve5B& levels, int serial = 0) {
+        handheld_.Prepare(sampleRate, TraitsOf(BoardKind::Handheld, serial));
+        console_.Prepare(sampleRate, levels, TraitsOf(BoardKind::Console, serial));
     }
 
-    void Reset(const MachineSettings& s) {
+    // The unit with `serial` of a board: 0 the nominal one (Board.h).
+    [[nodiscard]] static UnitTraits TraitsOf(BoardKind kind, int serial) noexcept {
+        return DrawTraits(kind == BoardKind::Handheld ? Handheld::kSpread : Console::kSpread,
+                          static_cast<std::uint32_t>(serial));
+    }
+
+    // Switches the unit on and runs its driver's start; it stands for its
+    // warm-up before the playing starts, its crystal `trim` (Timebase's
+    // units) off its own.
+    void Reset(const MachineSettings& s, std::int64_t trim = 0) {
         kind_ = s.board;
         settings_ = s;
         settings_.expansionChannels = s.expansionChannels < 1 ? 1 : s.expansionChannels > 8 ? 8 : s.expansionChannels;
         switch (kind_) {
         case BoardKind::Handheld:
             settings_.revision = Clamp(s.revision, Handheld::kRevisions);
-            handheld_.Reset(settings_.revision);
+            handheld_.Reset(settings_.revision, trim);
             handheldDriver_.Boot(handheld_);
             settings_.expansion = Console::kNone;
             break;
         default:
             settings_.revision = Clamp(s.revision, Console::kRevisions);
-            console_.Reset(settings_.revision, s.expansion);
+            console_.Reset(settings_.revision, s.expansion, trim);
             consoleDriver_.Boot(console_, settings_.expansionChannels, s.bias);
             settings_.expansion = console_.CartridgeType();
             break;
@@ -155,6 +165,28 @@ public:
         case BoardKind::Handheld: return handheld_.CycleAt(frame);
         default: return console_.CycleAt(frame);
         }
+    }
+
+    [[nodiscard]] std::int64_t Now() const noexcept {
+        return kind_ == BoardKind::Handheld ? handheld_.Now() : console_.Now();
+    }
+
+    // Where a cycle of this block falls in it (in the step buffer's
+    // positions, under the block's length), and the first cycle at or after
+    // such a position: how one unit's moment is found on another's clock.
+    [[nodiscard]] std::int64_t Position(std::int64_t cycle) const noexcept {
+        return kind_ == BoardKind::Handheld ? handheld_.Position(cycle) : console_.Position(cycle);
+    }
+    [[nodiscard]] std::int64_t CycleAtPosition(std::int64_t position) const noexcept {
+        return kind_ == BoardKind::Handheld ? handheld_.CycleAtPosition(position) : console_.CycleAtPosition(position);
+    }
+
+    // A trimmer on the unit's crystal, turned at the block's start.
+    void SetTrim(std::int64_t trim) noexcept {
+        if (kind_ == BoardKind::Handheld)
+            handheld_.SetTrim(trim);
+        else
+            console_.SetTrim(trim);
     }
 
     [[nodiscard]] std::int64_t NextEvent() const noexcept {

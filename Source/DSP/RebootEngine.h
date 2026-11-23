@@ -1,30 +1,40 @@
 #pragma once
 
-// Reboot's engine: one voice playing its machines (up to eight of one
-// board), the playing layer that writes their registers (ours, README How it
+// Reboot's engine: one voice playing its units (up to eight of one board),
+// the playing layer that writes their registers (ours, README How it
 // works), the level trim that brings every part to one loudness, and the
 // portfolio's output stage.
 //
-// The playing layer is a sound driver of our own. A note's writes land on
-// the cycle its MIDI event maps to; everything that moves while a note
-// sounds (the envelope's volume steps, vibrato, glide, the pitch wheel, the
-// arpeggio) is written at the machine's frame, as a game's driver ran on
-// its video frame. Pitch is always a period register, so the chip's own
-// quantisation, out-of-tune top notes and stepped vibrato are what is heard.
-// The envelope's times are in milliseconds and move the volume a fraction
-// of a step each frame; the chip is written the whole step it reaches.
+// The playing layer is a sound driver of our own, and a player above it. A
+// note's writes land on the cycle its MIDI event maps to; everything that
+// moves while a note sounds (the envelope's volume steps, vibrato, glide,
+// the pitch wheel) is written at the unit's own frame, as a game's driver
+// ran on its video frame. Every unit is a machine with its own crystal,
+// power-on moment and parts (Boards/Board.h, UnitTraits), and its driver
+// counts its own frames from its own power-on. The player decides which
+// unit's channel plays which key; its arpeggio steps on the first unit's
+// frame, and each step goes out to every unit at that moment, as a link
+// cable carries a master's ticks. Pitch is always a period register, so the
+// chip's own quantisation, out-of-tune top notes and stepped vibrato are
+// what is heard. The envelope's times are in milliseconds and move the
+// volume a fraction of a step each frame; the chip is written the whole
+// step it reaches.
 //
-// Oversampling renders the machines at 2, 4 or 8 times the host rate and
-// decimates them back (Render/Decimator.h); Double gives a second set of
-// machines that mirrors every register write of the first, detuned, the
-// first set on the left and the second on the right (ours, README How it
-// works).
+// Oversampling renders the units at 2, 4 or 8 times the host rate and
+// decimates them back (Render/Decimator.h). Double is a second set of
+// units of the same board, set up the same and given the same commands,
+// the first set on the left and the second on the right (owner,
+// 2026-11-18: "double is just having two devices of the same kind with the
+// same setup and wiring them to separate channels"). What parts the sides
+// is what parts two units: their crystals, their power-on moments and their
+// parts' values, and Detune, a pull on the two sets' crystals half of it
+// either way.
 //
 // Real time: Process, Midi, the note calls and SetControls neither allocate
 // nor lock. Prepare is setup. A change of board, revision, expansion,
-// expansion channels, machine count or Double resets the machines; then the
+// expansion channels, machine count or Double resets the units; then the
 // held keys play again. A change of mode or Part plays the held keys again
-// on the machines as they are.
+// on the units as they are.
 
 #include "Driver/Machine.h"
 #include "OutputStage.h"
@@ -100,14 +110,9 @@ private:
     // Scoped: the controls kAttack and kDecay share the names.
     enum class Stage { Attack, Decay, Sustained, Released };
 
-    // A channel of a machine, and the note it plays.
-    struct Slot {
-        bool busy = false;
-        bool gate = false;       // the key still holds it
-        bool fallback = false;   // borrowing another channel because the selected part cannot reach the pitch
-        bool started = false;    // the channel has been started for this note
-        int key = 0, velocity = 0;
-        Voice voice = Voice::Pulse;
+    // What the driver on one set's unit holds for a note: it moves on that
+    // unit's own frames.
+    struct Program {
         Stage stage = Stage::Attack;
         double env = 0.0;        // the envelope, 0 to 15 volume steps
         double from = 0.0;       // where the release began
@@ -115,9 +120,21 @@ private:
         int glideLeft = 0;       // frames to go
         int frames = 0;          // frames since the note began
         double phase = 0.0;      // vibrato, in cycles
+        bool ended = false;      // its release has run out and its channel is stopped
+        ChannelSettings written; // what the channel was last sent
+    };
+
+    // A channel of a machine, the same channel of its Double unit, and the
+    // note they play.
+    struct Slot {
+        bool busy = false;
+        bool gate = false;       // the key still holds it
+        bool fallback = false;   // borrowing another channel because the selected part cannot reach the pitch
+        bool started = false;    // the channel has been started for this note
+        int key = 0, velocity = 0;
+        Voice voice = Voice::Pulse;
         std::uint64_t age = 0;   // when it began, or was freed
-        ChannelSettings written;
-        ChannelSettings twin;    // what the Double set's channel was last sent
+        Program set[2];          // the first set's unit, then the Double set's
     };
 
     struct Key {
@@ -126,9 +143,14 @@ private:
         bool waitingForPitch = false;  // Poly note-on fell outside both register ranges
     };
 
-    // Slot s is on machine s / kMaxChannels, channel s % kMaxChannels.
+    // Slot s is on machine s / kMaxChannels, channel s % kMaxChannels; with
+    // Double, the same channel of machine kMaxBoards + s / kMaxChannels too.
+    // A machine's place in machines_ is its unit's serial number.
     static int Channel(int slot) noexcept { return slot % Machine::kMaxChannels; }
     static int BoardOf(int slot) noexcept { return slot / Machine::kMaxChannels; }
+    static int UnitOf(int slot, int set) noexcept { return set * kMaxBoards + BoardOf(slot); }
+    [[nodiscard]] int Sets() const noexcept { return double_ ? 2 : 1; }
+    [[nodiscard]] bool Active(int unit) const noexcept { return unit % kMaxBoards < boards_ && unit / kMaxBoards < Sets(); }
 
     void Apply(bool forceReset);
     void Revoice(bool reset);
@@ -141,22 +163,29 @@ private:
     void Retarget(int key, int velocity, bool glide);
     void Restart(Slot& n) const noexcept;
     void ReleaseSlot(int slot);
+    void EndSet(int slot, int set);
     void End(int slot);
-    void Settle(Slot& n) const noexcept;
-    void StepEnvelope(Slot& n) const noexcept;
-    [[nodiscard]] double Pitch(const Slot& n, double cents = 0.0) const;
-    // Cents each set plays off the note: the first set down, the Double set up.
-    [[nodiscard]] double Spread() const noexcept { return double_ ? detune_ / 2.0 : 0.0; }
-    [[nodiscard]] double Gain(const Slot& n) const noexcept;
-    bool Compose(int slot, ChannelSettings& s, double cents = 0.0) const;
-    void Send(int slot, const ChannelSettings& s, bool start);
+    void Settle(Program& p) const noexcept;
+    void StepEnvelope(Program& p) const noexcept;
+    [[nodiscard]] double Pitch(const Slot& n, int set) const;
+    [[nodiscard]] double Gain(const Slot& n, int set) const noexcept;
+    bool Compose(int slot, int set, ChannelSettings& s) const;
+    void Send(int slot, int set, const ChannelSettings& s, bool start);
+    bool HandOff(int slot);
+    void WriteSet(int slot, int set);
     void Write(int slot);
-    void Tick();
+    // Each set's crystal pull, in Timebase's units: half the detune either way.
+    [[nodiscard]] std::int64_t Pull(int set) const noexcept;
+    void Pace(int unit) noexcept;
+    [[nodiscard]] std::int64_t NextTick(int unit) const noexcept {
+        return (tickNum_[unit] + periodDen_ - 1) / periodDen_;
+    }
+    void Tick(int unit);
     [[nodiscard]] const Key& NextArpKey(int after) const noexcept;
     [[nodiscard]] int HeldIndex(int key) const noexcept;
 
-    Machine machines_[kMaxBoards];
-    Machine twins_[kMaxBoards];
+    // The first set's units, then from kMaxBoards the Double set's.
+    Machine machines_[2 * kMaxBoards];
     MachineSettings settings_;
     Slot slots_[kSlots];
     Key held_[128];
@@ -179,7 +208,9 @@ private:
     double frameHz_ = 60.0, vibratoStep_ = 0.0;
     int vibratoDelay_ = 0, glideFrames_ = 0;
     int arpKey_ = 0, arpCount_ = 0;
-    std::int64_t tickNum_ = 0, periodNum_ = 1, periodDen_ = 1;
+    // A frame of every unit is periodNum_ / periodDen_ of its cycles; each
+    // unit's next falls at tickNum_ / periodDen_, counted from its power-on.
+    std::int64_t tickNum_[2 * kMaxBoards] {}, periodNum_ = 1, periodDen_ = 1;
 
     int rate_ = 48000;
     int oversampling_ = 1;

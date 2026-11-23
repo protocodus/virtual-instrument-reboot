@@ -27,10 +27,8 @@ void Engine::Prepare(double sampleRate, int oversampling) {
     while (oversampling_ > 1 && rate_ * oversampling_ > kMaxInternalRate)
         oversampling_ /= 2;
     const auto curve5B = Console::Make5BCurve();
-    for (Machine& m : machines_)
-        m.Prepare(rate_ * oversampling_, curve5B);
-    for (Machine& m : twins_)
-        m.Prepare(rate_ * oversampling_, curve5B);
+    for (int u = 0; u < 2 * kMaxBoards; ++u)
+        machines_[u].Prepare(rate_ * oversampling_, curve5B, u);
     decimator_.Prepare(oversampling_);
     stage_.Prepare(static_cast<double>(rate_));
     for (Slot& s : slots_)
@@ -55,7 +53,7 @@ void Engine::SetControls(const Controls& raw) {
     if (c.value == controls_.value)
         return;
     retryPitch_ |= c[kTranspose] != controls_[kTranspose] || c[kFine] != controls_[kFine]
-        || c[kBendRange] != controls_[kBendRange] || c[kDetune] != controls_[kDetune];
+        || c[kBendRange] != controls_[kBendRange];
     controls_ = c;
     Apply(false);
 }
@@ -66,6 +64,7 @@ void Engine::Apply(bool forceReset) {
     const MachineSettings old = settings_;
     const int oldBoards = boards_, oldMode = mode_, oldPart = part_;
     const bool wasDouble = double_;
+    const double oldDetune = detune_;
     const Controls& c = controls_;
     mode_ = Clamp(Round(c[kMode]), 0, 2);
     arpRate_ = Clamp(Round(c[kArpRate]), 1, 8);
@@ -96,21 +95,27 @@ void Engine::Apply(bool forceReset) {
         || old.expansion != settings_.expansion || old.expansionChannels != settings_.expansionChannels
         || oldBoards != boards_ || wasDouble != double_;
     if (reset) {
-        // The machines start at cycle 0 on this block boundary, so their
-        // frames fall together.
-        for (int b = 0; b < boards_; ++b) {
-            machines_[b].Reset(settings_);
-            if (double_)
-                twins_[b].Reset(settings_);
-        }
+        // Each unit is switched on and stands for its own warm-up, so no two
+        // play from the same moment of their frames; its driver counts its
+        // frames from that power-on.
+        for (int u = 0; u < 2 * kMaxBoards; ++u)
+            if (Active(u))
+                machines_[u].Reset(settings_, Pull(u / kMaxBoards));
+        // The frame is the board's as reset, not as it was.
         machines_[0].FramePeriod(periodNum_, periodDen_);
+        for (int u = 0; u < 2 * kMaxBoards; ++u)
+            if (Active(u))
+                Pace(u);
+        // The driver knows only the nominal clock.
         frameHz_ = machines_[0].ClockHz() * static_cast<double>(periodDen_) / static_cast<double>(periodNum_);
-        tickNum_ = periodNum_;
-    } else if (console && old.bias != settings_.bias) {
-        for (int b = 0; b < boards_; ++b) {
-            machines_[b].SetBias(settings_.bias);
-            if (double_)
-                twins_[b].SetBias(settings_.bias);
+    } else {
+        for (int u = 0; u < 2 * kMaxBoards; ++u) {
+            if (!Active(u))
+                continue;
+            if (console && old.bias != settings_.bias)
+                machines_[u].SetBias(settings_.bias);
+            if (detune_ != oldDetune)
+                machines_[u].SetTrim(Pull(u / kMaxBoards));
         }
     }
     const Machine& m = machines_[0];
@@ -417,7 +422,7 @@ int Engine::StartNote(int key, int velocity, bool maySteal) {
         return -1;
     Slot probe;
     probe.key = key;
-    const double hz = Pitch(probe, -Spread());
+    const double hz = Pitch(probe, 0);
     std::int64_t period = 0;
     const bool fallback = !m.PeriodFor(part.first, part.voice, hz, shape_ % m.Shapes(part.first, part.voice), period);
     if (fallback) {
@@ -451,50 +456,76 @@ int Engine::StartNote(int key, int velocity, bool maySteal) {
     n.age = ++age_;
     // A note at sustain 0 keeps its channel while the key holds it, silent,
     // so that raising the sustain brings it back.
-    Settle(n);
-    ChannelSettings s;
-    Compose(best, s, -Spread());
-    Send(best, s, true);
+    for (int set = 0; set < Sets(); ++set) {
+        Settle(n.set[set]);
+        ChannelSettings s;
+        Compose(best, set, s);
+        Send(best, set, s, true);
+    }
     n.started = true;
     return best;
 }
 
 // A legato move of a Mono or Arp note to `key`, gliding from its current pitch.
+// Each set glides from where its own driver has the pitch.
 void Engine::Retarget(int key, int velocity, bool glide) {
     Slot& n = slots_[mono_];
-    const double offset = glide && glideFrames_ > 0 ? n.key + n.glide - key : 0.0;
+    for (Program& p : n.set) {
+        const double offset = glide && glideFrames_ > 0 ? n.key + p.glide - key : 0.0;
+        p.glide = offset;
+        p.glideLeft = offset != 0.0 ? glideFrames_ : 0;
+    }
     n.key = key, n.velocity = velocity;
-    n.glide = offset;
-    n.glideLeft = offset != 0.0 ? glideFrames_ : 0;
     Write(mono_);
 }
 
 // The envelope from the start, as a new note's: the arpeggio's steps.
 void Engine::Restart(Slot& n) const noexcept {
-    n.stage = Stage::Attack;
-    n.env = 0.0;
-    Settle(n);
+    for (Program& p : n.set) {
+        p.stage = Stage::Attack;
+        p.env = 0.0;
+        Settle(p);
+    }
 }
 
 void Engine::ReleaseSlot(int slot) {
     Slot& n = slots_[slot];
     n.gate = false;
-    n.stage = Stage::Released;
-    n.from = n.env;
-    Settle(n);
-    if (n.env <= 0.0)
-        End(slot);
+    for (int set = 0; set < Sets(); ++set) {
+        Program& p = n.set[set];
+        if (p.ended)
+            continue;
+        p.stage = Stage::Released;
+        p.from = p.env;
+        Settle(p);
+        if (p.env <= 0.0)
+            EndSet(slot, set);
+    }
+}
+
+// A set's channel stops when its own release runs out; the note ends when
+// every set's has.
+void Engine::EndSet(int slot, int set) {
+    Slot& n = slots_[slot];
+    if (!n.busy || n.set[set].ended)
+        return;
+    if (n.started)
+        machines_[UnitOf(slot, set)].Stop(Channel(slot));
+    n.set[set].ended = true;
+    for (int k = 0; k < Sets(); ++k)
+        if (!n.set[k].ended)
+            return;
+    End(slot);
 }
 
 void Engine::End(int slot) {
     Slot& n = slots_[slot];
     if (!n.busy)
         return;
-    if (n.started) {
-        machines_[BoardOf(slot)].Stop(Channel(slot));
-        if (double_)
-            twins_[BoardOf(slot)].Stop(Channel(slot));
-    }
+    if (n.started)
+        for (int set = 0; set < Sets(); ++set)
+            if (!n.set[set].ended)
+                machines_[UnitOf(slot, set)].Stop(Channel(slot));
     if (mono_ == slot)
         mono_ = -1;
     n.busy = false, n.gate = false, n.started = false;
@@ -505,150 +536,180 @@ void Engine::End(int slot) {
 
 // The envelope's moves that take no frame. A stage shorter than a frame
 // takes none (ours: the driver moves on the frame).
-void Engine::Settle(Slot& n) const noexcept {
-    if (n.stage == Stage::Attack && attack_ < 1.0) {
-        n.env = 15.0;
-        n.stage = Stage::Decay;
+void Engine::Settle(Program& p) const noexcept {
+    if (p.stage == Stage::Attack && attack_ < 1.0) {
+        p.env = 15.0;
+        p.stage = Stage::Decay;
     }
-    if (n.stage == Stage::Decay && (decay_ < 1.0 || n.env <= sustain_))
-        n.stage = Stage::Sustained;
-    if (n.stage == Stage::Sustained)
-        n.env = sustain_;
-    if (n.stage == Stage::Released && release_ < 1.0)
-        n.env = 0.0;
+    if (p.stage == Stage::Decay && (decay_ < 1.0 || p.env <= sustain_))
+        p.stage = Stage::Sustained;
+    if (p.stage == Stage::Sustained)
+        p.env = sustain_;
+    if (p.stage == Stage::Released && release_ < 1.0)
+        p.env = 0.0;
 }
 
 // One frame of the envelope: each stage moves at the rate that takes it
 // its time, attack from 0 to 15, decay from 15 to the sustain level, release
 // from where the key left it to 0, so a change of a time is heard at once.
-void Engine::StepEnvelope(Slot& n) const noexcept {
-    switch (n.stage) {
+void Engine::StepEnvelope(Program& p) const noexcept {
+    switch (p.stage) {
     case Stage::Attack:
-        n.env += 15.0 / attack_;
-        if (n.env >= 15.0) {
-            n.env = 15.0;
-            n.stage = Stage::Decay;
+        p.env += 15.0 / attack_;
+        if (p.env >= 15.0) {
+            p.env = 15.0;
+            p.stage = Stage::Decay;
         }
         break;
     case Stage::Decay:
-        n.env -= (15.0 - sustain_) / decay_;
-        if (n.env <= sustain_)
-            n.stage = Stage::Sustained;
+        p.env -= (15.0 - sustain_) / decay_;
+        if (p.env <= sustain_)
+            p.stage = Stage::Sustained;
         break;
     case Stage::Released:
-        n.env -= n.from / release_;
-        if (n.env < 0.0)
-            n.env = 0.0;
+        p.env -= p.from / release_;
+        if (p.env < 0.0)
+            p.env = 0.0;
         break;
     default:
         break;
     }
-    Settle(n);
+    Settle(p);
 }
 
-double Engine::Pitch(const Slot& n, double cents) const {
-    double semitones = n.key + transpose_ + (fine_ + cents + tune_) / 100.0 + n.glide + bend_ * bendRange_;
+// The pitch the set's driver asks of a unit at the nominal clock: a unit
+// whose crystal runs off plays as far off.
+double Engine::Pitch(const Slot& n, int set) const {
+    const Program& p = n.set[set];
+    double semitones = n.key + transpose_ + (fine_ + tune_) / 100.0 + p.glide + bend_ * bendRange_;
     const double depth = vibratoDepth_ + 50.0 * wheel_;
-    if (depth > 0.0 && n.frames > vibratoDelay_)
-        semitones += depth / 100.0 * std::sin(6.283185307179586 * n.phase);
+    if (depth > 0.0 && p.frames > vibratoDelay_)
+        semitones += depth / 100.0 * std::sin(6.283185307179586 * p.phase);
     return 440.0 * std::pow(2.0, (semitones - 69.0) / 12.0);
 }
 
-// The normalised level [0, 1] the envelope has reached, at the level and touch.
-double Engine::Gain(const Slot& n) const noexcept {
+// The normalised level [0, 1] the set's envelope has reached, at the level
+// and touch.
+double Engine::Gain(const Slot& n, int set) const noexcept {
     const double touch = 1.0 - velocity_ * (1.0 - n.velocity / 127.0);
-    const double gain = (level_ / 15.0) * touch * (n.env / 15.0);
+    const double gain = (level_ / 15.0) * touch * (n.set[set].env / 15.0);
     return gain < 0.0 ? 0.0 : gain > 1.0 ? 1.0 : gain;
 }
 
-// The slot's settings now. False when its pitch is out of its channel's
-// reach, and then the period it last wrote.
-bool Engine::Compose(int slot, ChannelSettings& s, double cents) const {
+// The slot's settings now on the set's unit. False when its pitch is out of
+// its channel's reach, and then the period it last wrote.
+bool Engine::Compose(int slot, int set, ChannelSettings& s) const {
     const Slot& n = slots_[slot];
-    const Machine& m = machines_[BoardOf(slot)];
+    const Machine& m = machines_[UnitOf(slot, set)];
     const int ch = Channel(slot);
     s.voice = n.voice;
     s.shape = shape_ % m.Shapes(ch, n.voice);
     s.mod = mod_;
-    s.volume = m.QuantizeVolume(ch, n.voice, Gain(n));
-    if (m.PeriodFor(ch, n.voice, Pitch(n, cents), s.shape, s.period))
+    s.volume = m.QuantizeVolume(ch, n.voice, Gain(n, set));
+    if (m.PeriodFor(ch, n.voice, Pitch(n, set), s.shape, s.period))
         return true;
-    s.period = n.started ? n.written.period : s.period;
+    s.period = n.started ? n.set[set].written.period : s.period;
     return false;
 }
 
-// Sends the slot's settings to its machine as a start or a change, and with
-// Double the same note half the detune up to the Double set's machine;
-// each hears only what differs from what it last heard.
-void Engine::Send(int slot, const ChannelSettings& s, bool start) {
-    Slot& n = slots_[slot];
+// Sends the set's unit the slot's settings as a start or a change; it
+// hears only what differs from what it last heard.
+void Engine::Send(int slot, int set, const ChannelSettings& s, bool start) {
+    Program& p = slots_[slot].set[set];
+    Machine& machine = machines_[UnitOf(slot, set)];
     const int ch = Channel(slot);
-    Machine& machine = machines_[BoardOf(slot)];
     if (start)
         machine.Start(ch, s);
-    else if (!Same(s, n.written))
+    else if (!Same(s, p.written))
         machine.Change(ch, s);
-    n.written = s;
-    if (!double_)
-        return;
-    // Where the detune takes the note out of the channel's reach, the
-    // Double set plays the first set's period.
-    ChannelSettings t;
-    if (!Compose(slot, t, Spread()))
-        t = s;
-    Machine& twin = twins_[BoardOf(slot)];
-    if (start)
-        twin.Start(ch, t);
-    else if (!Same(t, n.twin))
-        twin.Change(ch, t);
-    n.twin = t;
+    p.written = s;
 }
 
-// Preserve the note's envelope, glide and vibrato across a channel handoff.
-// Prefer the same machine, then a free compatible channel on another one.
-// A bend must not steal another held note: if all the fallbacks are busy,
-// the note waits silently at its present slot until the pitch or room changes.
-void Engine::Write(int slot) {
+// The player moves a note to the fallback part when its own part cannot
+// reach the pitch, and back once it can, keeping the note's envelope, glide
+// and vibrato on every set. Prefer the same machine, then a free compatible
+// channel on another one. A bend must not steal another held note: if all
+// the fallbacks are busy, the note waits silently at its present slot until
+// the pitch or room changes. True when the note moved; the first set's
+// driver decides for both.
+bool Engine::HandOff(int slot) {
     const Slot& n = slots_[slot];
     const int board = BoardOf(slot);
     const Machine& m = machines_[board];
-    ChannelSettings s;
-    const bool fits = Compose(slot, s, -Spread());
-    if (n.fallback || !fits) {
-        const Part primary = m.PartOf(part_);
-        const Part dest = n.fallback ? primary : m.FallbackOf(primary);
-        std::int64_t period;
-        if (dest.count > 0 && m.PeriodFor(dest.first, dest.voice, Pitch(n, -Spread()),
-                                          shape_ % m.Shapes(dest.first, dest.voice), period)) {
-            for (int i = 0; i < boards_; ++i) {
-                const int base = ((board + i) % boards_) * Machine::kMaxChannels;
-                for (int ch = dest.first; ch < dest.first + dest.count; ++ch) {
-                    const int next = base + ch;
-                    if (slots_[next].busy)
-                        continue;
-                    slots_[next] = n;
-                    slots_[next].voice = dest.voice;
-                    slots_[next].fallback = !n.fallback;
-                    if (slot == mono_)
-                        mono_ = next;
-                    End(slot);
-                    Compose(next, s, -Spread());
-                    Send(next, s, true);
-                    return;
-                }
+    const int ch = Channel(slot);
+    const double hz = Pitch(n, 0);
+    std::int64_t period;
+    if (!n.fallback && m.PeriodFor(ch, n.voice, hz, shape_ % m.Shapes(ch, n.voice), period))
+        return false;
+    const Part primary = m.PartOf(part_);
+    const Part dest = n.fallback ? primary : m.FallbackOf(primary);
+    if (dest.count == 0 || !m.PeriodFor(dest.first, dest.voice, hz, shape_ % m.Shapes(dest.first, dest.voice), period))
+        return false;
+    for (int i = 0; i < boards_; ++i) {
+        const int base = ((board + i) % boards_) * Machine::kMaxChannels;
+        for (int c = dest.first; c < dest.first + dest.count; ++c) {
+            const int next = base + c;
+            if (slots_[next].busy)
+                continue;
+            slots_[next] = n;
+            slots_[next].voice = dest.voice;
+            slots_[next].fallback = !n.fallback;
+            if (slot == mono_)
+                mono_ = next;
+            End(slot);
+            for (int set = 0; set < Sets(); ++set) {
+                if (slots_[next].set[set].ended)
+                    continue;
+                ChannelSettings s;
+                Compose(next, set, s);
+                Send(next, set, s, true);
             }
+            return true;
         }
-        if (!fits)
-            s.volume = 0;
     }
-    Send(slot, s, false);
+    return false;
 }
 
-// The machines' frame: the arpeggio, whose every step starts the envelope
-// again, then each note's envelope, glide, vibrato and pitch wheel.
-void Engine::Tick() {
+// The set's unit is sent the note as it stands; a pitch its channel cannot
+// reach is written silent, at the period it last had.
+void Engine::WriteSet(int slot, int set) {
+    ChannelSettings s;
+    if (!Compose(slot, set, s))
+        s.volume = 0;
+    Send(slot, set, s, false);
+}
+
+// A command to every set's unit at once.
+void Engine::Write(int slot) {
+    if (HandOff(slot))
+        return;
+    for (int set = 0; set < Sets(); ++set)
+        if (!slots_[slot].set[set].ended)
+            WriteSet(slot, set);
+}
+
+std::int64_t Engine::Pull(int set) const noexcept {
+    if (!double_)
+        return 0;
+    const double cents = set == 0 ? -detune_ / 2.0 : detune_ / 2.0;
+    return static_cast<std::int64_t>(std::floor((std::pow(2.0, cents / 1200.0) - 1.0) * static_cast<double>(Timebase::kTrimUnit) + 0.5));
+}
+
+// A unit's driver counts its frames from the unit's power-on: its next
+// frame is the first boundary after now.
+void Engine::Pace(int unit) noexcept {
+    const std::int64_t now = machines_[unit].Now();
+    tickNum_[unit] = periodNum_ * (now * periodDen_ / periodNum_ + 1);
+}
+
+// A unit's frame. On the first unit's, the player's arpeggio, whose every
+// step starts the envelope again on every set; then, for each note on this
+// unit, its driver's envelope, glide, vibrato and pitch wheel.
+void Engine::Tick(int unit) {
+    tickNum_[unit] += periodNum_;
+    const int set = unit / kMaxBoards, board = unit % kMaxBoards;
     int restarted = -1;
-    if (mode_ == 2 && heldCount_ > 0 && ++arpCount_ >= arpRate_) {
+    if (unit == 0 && mode_ == 2 && heldCount_ > 0 && ++arpCount_ >= arpRate_) {
         arpCount_ = 0;
         const Key& next = NextArpKey(arpKey_);
         arpKey_ = next.key;
@@ -660,26 +721,28 @@ void Engine::Tick() {
         }
         restarted = mono_;
     }
-    int writes[kSlots];
+    int writes[Machine::kMaxChannels];
     int count = 0;
-    for (int s = 0; s < boards_ * Machine::kMaxChannels; ++s) {
+    for (int ch = 0; ch < Machine::kMaxChannels; ++ch) {
+        const int s = board * Machine::kMaxChannels + ch;
         Slot& n = slots_[s];
-        if (!n.busy)
+        Program& p = n.set[set];
+        if (!n.busy || p.ended)
             continue;
-        ++n.frames;
-        if (n.frames > vibratoDelay_) {
-            n.phase += vibratoStep_;
-            n.phase -= std::floor(n.phase);
+        ++p.frames;
+        if (p.frames > vibratoDelay_) {
+            p.phase += vibratoStep_;
+            p.phase -= std::floor(p.phase);
         }
-        if (n.glideLeft > 0) {
-            n.glide -= n.glide / n.glideLeft;
-            --n.glideLeft;
+        if (p.glideLeft > 0) {
+            p.glide -= p.glide / p.glideLeft;
+            --p.glideLeft;
         }
         // A step's new envelope starts on this frame, as a new note's does.
         if (s != restarted)
-            StepEnvelope(n);
-        if (n.env <= 0.0 && n.stage == Stage::Released) {
-            End(s);
+            StepEnvelope(p);
+        if (p.env <= 0.0 && p.stage == Stage::Released) {
+            EndSet(s, set);
             continue;
         }
         writes[count++] = s;
@@ -687,7 +750,8 @@ void Engine::Tick() {
     // A write can move a note to a free slot. Finish every envelope first
     // so no note advances twice (or loses a frame) when it changes channels.
     for (int i = 0; i < count; ++i)
-        Write(writes[i]);
+        if (set != 0 || !HandOff(writes[i]))
+            WriteSet(writes[i], set);
     if (retryPitch_)
         RetryHeldPitches();
 }
@@ -700,35 +764,39 @@ void Engine::Process(float* left, float* right, int frames) {
         for (float* bus : bus_)
             for (int i = 0; i < m; ++i)
                 bus[i] = 0.0f;
-        const std::int64_t end = machines_[0].CycleAt(m);
+        std::int64_t end[2 * kMaxBoards];
+        for (int u = 0; u < 2 * kMaxBoards; ++u)
+            end[u] = Active(u) ? machines_[u].CycleAt(m) : 0;
+        // The units' frames in the order they fall. Every unit is brought to
+        // the moment of the one whose frame it is, so what the player sends
+        // then reaches each unit at that moment on its own clock.
         for (;;) {
-            const std::int64_t tick = (tickNum_ + periodDen_ - 1) / periodDen_;
-            std::int64_t next = tick;
-            for (int b = 0; b < boards_; ++b) {
-                next = Earliest(next, machines_[b].NextEvent());
-                if (double_)
-                    next = Earliest(next, twins_[b].NextEvent());
+            int due = -1;
+            std::int64_t at = 0;
+            for (int u = 0; u < 2 * kMaxBoards; ++u) {
+                if (!Active(u) || NextTick(u) >= end[u])
+                    continue;
+                const std::int64_t position = machines_[u].Position(NextTick(u));
+                if (due < 0 || position < at)
+                    due = u, at = position;
             }
-            if (next >= end)
+            if (due < 0)
                 break;
-            for (int b = 0; b < boards_; ++b) {
-                machines_[b].RunTo(next);
-                machines_[b].ServiceAt(next);
-                if (double_) {
-                    twins_[b].RunTo(next);
-                    twins_[b].ServiceAt(next);
-                }
+            for (int u = 0; u < 2 * kMaxBoards; ++u) {
+                if (!Active(u) || u == due)
+                    continue;
+                const std::int64_t cycle = machines_[u].CycleAtPosition(at);
+                if (cycle > machines_[u].Now())
+                    machines_[u].RunTo(cycle);
             }
-            if (next == tick) {
-                Tick();
-                tickNum_ += periodNum_;
-            }
+            const std::int64_t tick = NextTick(due);
+            machines_[due].RunTo(tick);
+            machines_[due].ServiceAt(tick);
+            Tick(due);
         }
-        for (int b = 0; b < boards_; ++b) {
-            machines_[b].Render(m, path_, bus_[0], bus_[1]);
-            if (double_)
-                twins_[b].Render(m, path_, bus_[2], bus_[3]);
-        }
+        for (int u = 0; u < 2 * kMaxBoards; ++u)
+            if (Active(u))
+                machines_[u].Render(m, path_, bus_[u < kMaxBoards ? 0 : 2], bus_[u < kMaxBoards ? 1 : 3]);
         const auto mix = [&](int i, float g) {
             if (double_) {
                 // Each stereo set folds to its side at the single-set level.

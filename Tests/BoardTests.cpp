@@ -803,6 +803,52 @@ void TestDiskMasterWrites() {
     }
 }
 
+// Every unit of a board is drawn from its serial within the board's spread
+// (Board.h, UnitSpread): serial 0 is the nominal unit, no two of a set of
+// sixteen share a crystal, and a crystal's pull moves a held note by its
+// ratio, the period unchanged.
+void TestUnits() {
+    for (BoardKind kind : { BoardKind::Handheld, BoardKind::Console }) {
+        const char* name = kind == BoardKind::Handheld ? "handheld" : "console";
+        const UnitSpread spread = kind == BoardKind::Handheld ? Handheld::kSpread : Console::kSpread;
+        const UnitTraits nominal = Machine::TraitsOf(kind, 0);
+        Check(nominal.clock == 0 && nominal.warmUp == 0 && nominal.level == 1.0 && nominal.corner == 1.0,
+              std::string(name) + ": unit 0 is not the nominal unit");
+        std::vector<std::int64_t> clocks;
+        for (int serial = 1; serial < 16; ++serial) {
+            const UnitTraits t = Machine::TraitsOf(kind, serial);
+            Check(std::llabs(t.clock) <= spread.clock && t.warmUp >= 0 && t.warmUp <= spread.warmUp
+                      && std::fabs(t.level - 1.0) <= spread.level && std::fabs(t.corner - 1.0) <= spread.corner,
+                  std::string(name) + ": unit " + std::to_string(serial) + " lies outside the board's spread");
+            Check(std::find(clocks.begin(), clocks.end(), t.clock) == clocks.end(),
+                  std::string(name) + ": unit " + std::to_string(serial) + " shares another's crystal");
+            clocks.push_back(t.clock);
+        }
+    }
+    // One percent fast is 17.2 cents sharp.
+    const double pull = 1200.0 * std::log2(1.01);
+    for (const Setup& setup : { Setups()[0], Setups()[2] }) {
+        auto m = std::make_unique<Machine>();
+        ChannelSettings note;
+        note.voice = Voice::Pulse;
+        note.shape = 2;
+        note.volume = m->QuantizeVolume(0, Voice::Pulse, 1.0);
+        Check(m->PeriodFor(0, Voice::Pulse, KeyHz(57), note.shape, note.period), std::string(setup.name) + ": A3 out of reach");
+        const Render plain = Play(*m, setup.settings, 0, note, 1.0, Path::Pin);
+        m->Prepare(kRate);
+        m->Reset(setup.settings, Timebase::kTrimUnit / 100);
+        m->Start(0, note);
+        Render pulled;
+        pulled.left.assign(kRate, 0.0f);
+        pulled.right.assign(kRate, 0.0f);
+        for (int done = 0; done < kRate; done += 256)
+            m->Render(std::min(256, kRate - done), Path::Pin, pulled.left.data() + done, pulled.right.data() + done);
+        const double moved = Cents(Measure(pulled.left, KeyHz(57), kRate, 0.2), Measure(plain.left, KeyHz(57), kRate, 0.2));
+        Check(std::fabs(moved - pull) < 0.2, std::string(setup.name) + ": a 1 % crystal pull moves A3 "
+              + std::to_string(moved) + " cents, not " + std::to_string(pull));
+    }
+}
+
 int main() {
     TestKernels();
     TestStereoDecimatorHistory();
@@ -817,6 +863,7 @@ int main() {
     TestBlackboxBus();
     TestDiskMasterWrites();
     TestLongBoardInitialization();
+    TestUnits();
     if (failures == 0)
         std::printf("Reboot.Boards: all checks passed\n");
     return failures == 0 ? 0 : 1;

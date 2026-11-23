@@ -22,6 +22,54 @@ namespace protocodus::reboot {
 // machine's line output (the board's own stage after them).
 enum class Path : std::uint8_t { Pin, Line };
 
+// What sets one unit apart from another of its board: no two were built
+// alike or switched on at the same moment (README, How it works, Units).
+struct UnitTraits {
+    std::int64_t clock = 0;    // its crystal off nominal, in Timebase's trim units (0.01 ppm)
+    std::int64_t warmUp = 0;   // the cycles it has been on when the playing starts
+    double level = 1.0;        // its output against the nominal unit's
+    double corner = 1.0;       // its output stage's RC corners against the nominal unit's
+};
+
+// How far a board's units lie apart: the clock and the parts either way of
+// nominal, the warm-up from none up. Each board says where its figures come
+// from.
+struct UnitSpread {
+    std::int64_t clock;
+    std::int64_t warmUp;
+    double level;
+    double corner;
+};
+
+// The unit with this serial number, within its board's spread. Ours: serial
+// 0 is the nominal unit, so one unit alone plays as the documents' formulas
+// say, and every other serial is drawn by an integer hash (a multiply and
+// xor-shift mix; any well-spread one would do), so a serial is the same unit
+// in every session and every render.
+constexpr UnitTraits DrawTraits(const UnitSpread& spread, std::uint32_t serial) noexcept {
+    if (serial == 0)
+        return {};
+    double draw[4] {};   // each -1 .. 1
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        std::uint32_t h = serial * 0x9E3779B9u + (i + 1) * 0x7F4A7C15u;
+        h ^= h >> 16;
+        h *= 0x45D9F3Bu;
+        h ^= h >> 15;
+        h *= 0x2C1B3C6Du;
+        h ^= h >> 16;
+        draw[i] = static_cast<double>(h >> 8) / 8388608.0 - 1.0;
+    }
+    UnitTraits t;
+    // To the nearest unit: a truncated draw would make the nominal crystal
+    // twice as likely as any other.
+    const double clock = draw[0] * static_cast<double>(spread.clock);
+    t.clock = static_cast<std::int64_t>(clock + (clock < 0.0 ? -0.5 : 0.5));
+    t.warmUp = static_cast<std::int64_t>((draw[1] + 1.0) / 2.0 * static_cast<double>(spread.warmUp));
+    t.level = 1.0 + draw[2] * spread.level;
+    t.corner = 1.0 + draw[3] * spread.corner;
+    return t;
+}
+
 // The Pin path has no stage of the machine's, but a DAC sum carries the
 // chips' DC offsets (a Game Boy channel at rest sits at +1); a first-order
 // high-pass at 5 Hz takes them out. Ours, under every board's Pin path.
