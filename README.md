@@ -29,14 +29,14 @@ on four consoles.
 
 | # | Preset | Demo | Length | Peak |
 | --- | --- | --- | --- | --- |
-| 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -11.9 dBFS |
-| 2 | Wave Bass | [02-wave-bass.wav](Docs/audio/02-wave-bass.wav) | 8.4 s | -12.8 dBFS |
-| 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -15.5 dBFS |
-| 4 | Static Snare | [04-static-snare.wav](Docs/audio/04-static-snare.wav) | 10.8 s | -15.5 dBFS |
+| 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -12.2 dBFS |
+| 2 | Wave Bass | [02-wave-bass.wav](Docs/audio/02-wave-bass.wav) | 8.4 s | -13.0 dBFS |
+| 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -16.9 dBFS |
+| 4 | Static Snare | [04-static-snare.wav](Docs/audio/04-static-snare.wav) | 10.8 s | -15.7 dBFS |
 | 5 | Triangle Bass | [05-triangle-bass.wav](Docs/audio/05-triangle-bass.wav) | 8.3 s | -17.9 dBFS |
-| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -19.5 dBFS |
-| 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -18.2 dBFS |
-| 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -8.3 dBFS |
+| 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -19.2 dBFS |
+| 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -18.8 dBFS |
+| 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -8.5 dBFS |
 
 <!-- audio-demos-end -->
 
@@ -47,6 +47,12 @@ Tools/update_readme_blocks.py demos --readme README.md --manifest
 WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
+
+### 0.6.0 — 2026-11-23 — two real units, each on its own frames
+
+Every machine is now a unit of its own: its own crystal, the moment it was switched on, and its own output level and filter corners within its parts' tolerances. Its sound driver counts frames from its own power-on, so two units' envelope and vibrato steps fall at their own moments. Double is two units of the same board set up the same and given the same notes, the first on the left and the second on the right: their differences are the stereo, and Detune pulls the two crystals apart, moving the whole unit rather than its period steps. A held note on the second unit is not a copy of the first.
+
+Four controls join, each at the value that plays as 0.5.2 did. Poly channels lets a chord spill from the part's channels onto the chip's other pitched voices once the part's are held (the handheld's two pulses then its wave; the console's pulses, triangle and cartridge voices). Arp order plays up, down, up and down, or as played. Arp retrigger off moves the pitch only and leaves the envelope. Driver rate runs the driver 1 to 8 times a frame, as a driver on a timer interrupt does; times stay in ms and the arpeggio counts ticks.
 
 ### 0.5.2 — 2026-11-20 — held notes and rendering cost
 
@@ -371,15 +377,31 @@ register are jumped ahead exactly when it can be (`Chips/Lfsr.h`).
   stage delays by whole host samples, so the latency is 16 samples at 1x,
   then 24, 28 and 30 at 2x, 4x and 8x, plus the output stage's 96 at 48
   kHz.
-- **Double** gives the voice a second set of machines that takes every
-  register write of its first, with its note half the Detune up while the first plays half
-  of it down. The first set plays on the left and the second on the right,
-  each folded to mono at the level one side of a single set has: two
-  machines side by side, as chip musicians play two handhelds live. Here
-  the two sets share one clock and start together, so with no detune each
-  side is the single set's sound, bit for bit; the detune is ours. Where it
-  takes a note out of a channel's reach, the second set plays the first
-  set's period. A change of Double resets the machines.
+- **Units.** Each machine is one unit, the same unit every time: the one
+  with its place's serial number (`Boards/Board.h`, `DrawTraits`). Serial
+  0 is the nominal unit; the others are drawn from the board's spread. The
+  handheld's crystals lie 20 ppm apart (Pan Docs, Specifications: real
+  units "tend to run about 50-70 PPM slow"; reported, the nominal unit
+  kept at the documents' 4194304 Hz), the console's 1.9 ppm either way
+  (NESdev, Cycle reference chart: "21.477272 MHz ± 40 Hz"; reported). A
+  unit is heard as one that has stood since its driver's start, for up to
+  a second on the handheld and 262144 cycles on the console, so its video
+  frame, dividers and noise register stand where that leaves them. Its
+  output level lies within 5 % and every corner of its output stage within
+  10 % of nominal (estimate: what 5 % resistors and 10 % capacitors give).
+- **Double** is a second set of units of the same board, set up the same
+  and sent the same notes at the same moments (owner, 2026-11-18: "double
+  is just having two devices of the same kind with the same setup and
+  wiring them to separate channels"). The first set plays on the left and
+  the second on the right, each folded to mono at the level one side of a
+  single set has: two machines side by side, as chip musicians play two
+  handhelds live. With no detune the left is the single set's sound, bit
+  for bit, and the right is another unit's: on the console a slow attack's
+  first step comes 16 ms apart on the two sides, and the second unit's
+  level sits 3 % above the first's. Detune pulls the two sets' crystals
+  apart, half of it either way, so the whole unit runs fast or slow: its
+  pitch, its frames and its envelopes together, the period registers
+  unchanged. A change of Double resets the units.
 - **CPU** on the development container (Release, GCC 13.3), six held keys
   on each preset at 48 kHz, measured on 0.2.3: 0.16 % of a core on average
   and 0.9 % at worst (Disk Organ's four consoles) at 1x; 1.1 % and 2.4 % at
@@ -402,11 +424,18 @@ machine blackbox.
   multiple harmonic cycles into wavetable RAM so high notes up to C8 play on
   the cartridge chip itself.
 - **Frames.** Everything that moves while a note sounds (the envelope's
-  volume steps, vibrato, glide, the pitch wheel, the host's master tuning,
-  the arpeggio) is written at the machines' frame, as a game's driver ran
-  on its video frame: 59.73 Hz on the handheld, 60.10 or 50.01 Hz on the
-  console. A note's own start and end land on its sample, and CH3's `NR32`
-  timer ISR fires at its exact master cycle between frames.
+  volume steps, vibrato, glide, the pitch wheel, the host's master tuning)
+  is written at the unit's own frame, as a game's driver ran on its video
+  frame: 59.73 Hz on the handheld, 60.10 or 50.01 Hz on the console, each
+  unit's counted from its own power-on on its own crystal. The driver
+  knows only the nominal clock, so a unit whose crystal runs off plays as
+  far off. **Driver rate** ticks the driver 2 to 8 times a frame instead,
+  as a driver on a timer interrupt does (the handheld's timer, Pan Docs
+  "Timer and Divider Registers"; on the console a cartridge's cycle
+  counter or the DMC's IRQ), as LSDj's FAST mode and an NSF's play-speed
+  field use; whole ticks a frame are ours. A note's own start and end land
+  on its sample, and CH3's `NR32` timer ISR fires at its exact master
+  cycle between ticks.
 - **Envelopes** are times: Attack from silence to full, Decay from full
   down to Sustain, Release from where the key leaves the note down to
   silence. Each frame the envelope moves by the share of its stage that a
@@ -417,13 +446,23 @@ machine blackbox.
   and noise, switching 15/7-bit LFSR width retriggers cleanly to prevent all-1s
   lock-up, and retriggering a silent `$08`-parked channel skips redundant `$08`
   writes so DMG zombie mode cannot blip `0 -> 1` before trigger. Mono's legato
-  notes keep their envelope; each Arp step starts it again.
+  notes keep their envelope; each Arp step starts it again, unless Arp
+  retrigger is off (LSDj keeps the two apart: its chord command moves the
+  pitch, and a retrigger is another command).
 - **Voices.** One voice plays up to eight machines of one board
   (**Boards**), with its revision, expansion, bias and path. A note takes
   the free channel of the part, on any of the machines, that was freed
   longest ago, else the oldest released note's, else the oldest note's.
+  With **Poly channels** on, a Poly chord spills onto the chip's other
+  pitched parts once every channel of the part is held, as one machine
+  plays a chord on its unlike voices (mGB's POLY channel plays the
+  handheld's two pulses and wave so); the noise takes no part.
   **Mode** is Poly, Mono (legato, with glide) or Arp (one voice stepping
-  through the held keys every Arp rate frames).
+  through the held keys every Arp rate ticks, in **Arp order**: up, down,
+  up and down without repeating the ends, or as played). The arpeggio is
+  the player's: it steps on the first unit's tick, and each step reaches
+  every unit at that moment on its own clock, as a link cable carries a
+  master's ticks.
 - **Waves** for the wave channels are our own harmonic waves
   (`Tools/generate_waves.py`), scaled to each chip's range.
 - **Level.** Every part and shape arrives at one loudness: that of one
@@ -452,13 +491,17 @@ machine blackbox.
 | Attack, Decay, Release | 0 to 5000 ms | the envelope's times |
 | Transpose, Fine, Mod | ±24 semitones, ±50 cents, 0 to 63 | pitch, and the disk unit's modulation depth |
 | Mode | Poly, Mono, Arp | how keys take voices |
-| Arp rate | 1 to 8 frames | frames an arpeggio step holds |
+| Arp rate | 1 to 8 ticks | ticks an arpeggio step holds |
 | Vibrato, rate, delay | 0 to 100 cents, 0.5 to 12 Hz, 0 to 1000 ms | written at the frame; the mod wheel adds up to 50 cents |
 | Glide | 0 to 1000 ms | a Mono legato note's slide |
 | Bend range | 0 to 12 semitones | the pitch wheel |
 | Velocity | 0 to 1 | how far a key's velocity scales the level |
-| Double, Detune | Off, On; 0 to 50 cents | a second set of machines on the right, its notes Detune above the first set's on the left |
+| Double, Detune | Off, On; 0 to 50 cents | a second set of units on the right; Detune pulls the two sets' crystals apart |
 | Volume | -24 to +6 dB | our trim after the machines |
+| Poly channels | Part, Chip | Poly on the part's channels, or the chip's other pitched channels too once the part's are held |
+| Arp order | Up, Down, Up and down, As played | the arpeggio's order |
+| Arp retrigger | Off, On | whether each arpeggio step starts the envelope again |
+| Driver rate | 1 to 8 ticks | the driver's ticks a video frame |
 | Oversampling | 1x, 2x, 4x, 8x | setup, not a control: the machines' rate over the host's (`Engine::Prepare`) |
 
 The control ids, ranges and defaults are `Source/DSP/RebootControls.h`, which
@@ -515,10 +558,23 @@ every front end reads; the factory presets are `Source/DSP/RebootPresets.h`.
 - **Ours, by design.** The sound drivers, the handheld's `NR32` timer ISR
   below 32 Hz and FDS/N163 multi-cycle high-octave wavetable folding, the noise
   pitch rule (a key picks the noise's colour), the period nearest in pitch, the
-  envelope's times and the Arp's restart of it, the frame's phase at reset, the
-  output stages settled at reset, the 5 Hz Pin blocker, the level trims and
-  their reference, Double's detune and oversampling's decimator are ours, not
-  the hardware's.
+  envelope's times and the Arp's restart of it, the output stages settled at
+  reset, the 5 Hz Pin blocker, the level trims and their reference, the
+  driver's ticks a frame, the player that spreads notes over units and
+  oversampling's decimator are ours, not the hardware's.
+- **Units are estimates.** The level (5 %) and corner (10 %) spreads are
+  typical parts' tolerances, not measurements of units; no one has
+  published how far two handhelds or consoles differ. The handheld's
+  nominal unit keeps the documents' clock where Pan Docs reports real ones
+  run 50 to 70 ppm slow, and its spread is that report's 20 ppm range. The
+  warm-ups are ours. Detune's pull reaches 25 cents, 1.5 %, which no
+  crystal's trimmer reaches: it stands for a unit built on another
+  crystal.
+- **The chips' own envelopes, sweeps and the handheld's sides are not
+  played yet.** The driver writes every volume step itself, as console
+  drivers did; the handheld's `NRx2` envelope, both machines' pitch sweeps
+  and the handheld's `NR51` left and right routing are emulated in the
+  cores but no control reaches them.
 - **The level trims' limits.** The trims match a part's single notes, at
   full level with Bias 0 and Mod 0, by K-weighted loudness; whether that or
   plain RMS (Reason's meter) is the better match for these tones has not
