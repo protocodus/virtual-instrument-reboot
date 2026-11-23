@@ -27,6 +27,23 @@ struct ChannelSettings {
     int volume = 0;
     int shape = 0;
     int mod = 0;
+    // The channel's own units, where it has them (Machine::EnvelopeOf,
+    // Machine::HasSweep); a channel without one plays as if they were 0.
+    int pace = 0;         // its envelope unit steps the volume once every `pace` of its steps; 0: the volume stays as written
+    bool up = false;      // that envelope climbs; else it falls
+    bool loop = false;    // a fallen envelope starts again from the top (the console's)
+    int sweep = 0;        // its sweep unit's pitch steps from the start: 1 to 7 a step's size (8 - its shift), + up, - down; 0 none
+    int sweepPace = 0;    // the sweep's steps apart, 1 to 8 of the unit's own (a pace past the unit's last is its last)
+    bool spread = false;  // the handheld's sides (NR51): pulse 1 left, pulse 2 right, the others both; else every channel both
+};
+
+// A channel's own envelope unit, as a driver must know it to play it.
+struct EnvelopeUnit {
+    int paces = 0;              // pace codes 1 to `paces`; 0: the channel has none
+    double cycles = 0.0;        // the board's cycles one volume step takes at pace 1; pace n takes n times as long
+    bool climbs = false;        // it can count up as well as down
+    bool fromVolume = false;    // it starts from the volume written; else always from 15
+    bool loops = false;         // it can start again from 15 when it reaches 0
 };
 
 // The whole period register nearest in pitch to an exact real one. Every

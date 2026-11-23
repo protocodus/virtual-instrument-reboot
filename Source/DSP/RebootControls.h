@@ -55,6 +55,11 @@ enum Control : int {
     kArpOrder,          // the arpeggio's order: 0 up, 1 down, 2 up and down, 3 as played
     kArpRetrigger,      // 1 each step of the arpeggio starts the envelope again; 0 it moves the pitch only
     kDriverRate,        // the driver's ticks a video frame, 1 to 8: its envelope, vibrato, glide and arpeggio move that often
+    // Added in 0.7.0, each at the value that plays as 0.6.0 did.
+    kEnvelope,          // 0 the driver writes every volume step; 1 the channel's own envelope unit plays them where it has one; 2 that, looping where the unit can
+    kSweep,             // the pulse sweep's step from a note's start, -7 to 7: + up, - down, the size 8 - its shift; 0 none
+    kSweepPace,         // the sweep's steps apart, 1 to 8 of its unit's ticks
+    kSides,             // the handheld's sides: 0 every channel to both, 1 pulse 1 left and pulse 2 right
     kControlCount
 };
 
@@ -104,6 +109,10 @@ inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "arp_order", "Arp order", 0.0, 3.0, 0.0, 4, Curve::kStepped, "" },
     { "arp_retrigger", "Arp retrigger", 0.0, 1.0, 1.0, 2, Curve::kStepped, "" },
     { "driver_rate", "Driver rate", 1.0, 8.0, 1.0, 8, Curve::kStepped, "ticks" },
+    { "envelope", "Envelope", 0.0, 2.0, 0.0, 3, Curve::kStepped, "" },
+    { "sweep", "Sweep", -7.0, 7.0, 0.0, 0, Curve::kInteger, "" },
+    { "sweep_pace", "Sweep pace", 1.0, 8.0, 4.0, 8, Curve::kStepped, "" },
+    { "sides", "Sides", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
 } };
 
 // The value of control `index` at normalised position n (clamped to 0..1).

@@ -213,6 +213,21 @@ public:
             rule.reach = Reach::NewNotes;
             rule.reason = "it chooses the channel a note takes when its key is struck";
             break;
+        case kEnvelope:
+            // Looping is the console's alone: on the handheld 2 plays as 1.
+            if (static_cast<int>(FromNormalized(static_cast<int>(index), value) + 0.5) == 2)
+                with({ { kBoard, 1 } });
+            break;
+        case kSweep:
+            rule.reach = Reach::NewNotes;
+            rule.reason = "a sweep runs from the trigger it is written before (NR10, $4001), and the driver leaves a "
+                          "sweeping pulse's period to it";
+            break;
+        case kSweepPace:
+            with({ { kSweep, -2 } });
+            rule.reach = Reach::NewNotes;
+            rule.reason = "a sweep runs from the trigger it is written before (NR10, $4001)";
+            break;
         default:
             break;
         }

@@ -219,6 +219,15 @@ public:
         }
     }
 
+    // The channel's own envelope unit, if it has one (DriverTypes.h).
+    [[nodiscard]] EnvelopeUnit EnvelopeOf(int channel) const noexcept {
+        return kind_ == BoardKind::Handheld ? HandheldDriver::EnvelopeOf(channel) : ConsoleDriver::EnvelopeOf(console_, channel);
+    }
+
+    [[nodiscard]] bool HasSweep(int channel) const noexcept {
+        return kind_ == BoardKind::Handheld ? HandheldDriver::HasSweep(channel) : ConsoleDriver::HasSweep(channel);
+    }
+
     void Start(int channel, const ChannelSettings& s) {
         switch (kind_) {
         case BoardKind::Handheld: handheldDriver_.Start(handheld_, channel, s); break;

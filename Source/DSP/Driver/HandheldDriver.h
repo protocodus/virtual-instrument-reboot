@@ -14,6 +14,10 @@
 //   drivers extend CH3 below its register floor without modifying the chip.
 // - Noise (CH4): retriggers when switching between 15-bit and 7-bit LFSR width
 //   so a held note cannot hit Pan Docs' all-1s LFSR lock-up.
+// - The chip's own units, when the playing layer asks for them: the pulses'
+//   and the noise's envelope (NRx2), taken at a trigger; CH1's sweep (NR10),
+//   written before a trigger, after which the driver leaves CH1's period to
+//   it; and the sides each channel goes to (NR51), written as they change.
 
 #include "../Boards/Handheld.h"
 #include "DriverTypes.h"
@@ -41,6 +45,8 @@ public:
         isrLastNr32_ = 0;
         isrDue_ = 0;
         isrStepPeriod_ = 0;
+        nr51_ = 0xFF;
+        nr10_ = 0x00;
 
         // A sound driver's start: power on, full master volume, every
         // channel to both sides, the sweep off (Pan Docs, Audio registers).
@@ -50,6 +56,17 @@ public:
         h.Write(0xFF10, 0x00);
         h.FinishBoot();
     }
+
+    // The pulses' and the noise's envelope unit (Pan Docs, Audio Registers,
+    // NRx2; spec): from a trigger it moves the volume one step every pace
+    // ticks of the 64 Hz DIV-APU step, 65536 cycles, up to 15 or down to 0,
+    // from the volume NRx2 gives; pace 0 holds it. The wave channel has none.
+    [[nodiscard]] static EnvelopeUnit EnvelopeOf(int channel) noexcept {
+        return channel == 2 ? EnvelopeUnit {} : EnvelopeUnit { 7, 65536.0, true, true, false };
+    }
+
+    // Only CH1 has a sweep (Pan Docs, NR10).
+    [[nodiscard]] static bool HasSweep(int channel) noexcept { return channel == 0; }
 
     [[nodiscard]] static int QuantizeVolume(int channel, Voice, double gain) noexcept {
         if (channel == 2) {
@@ -112,58 +129,76 @@ public:
 
     void Start(Handheld& h, int channel, const ChannelSettings& s) noexcept {
         Shadow& sh = shadow_[channel];
+        Sides(h, channel, s.spread);
         if (channel < 2) {
             const std::uint16_t base = channel == 0 ? 0xFF10 : 0xFF15;
             const int x = 2048 - static_cast<int>(s.period);
             const int volume = Clamp(s.volume, 0, 15);
-            // Pan Docs: write $V8 to NRx2 before the trigger so the DAC stays on
-            // and the envelope does not run. When the DAC is off (!sh.active),
-            // write NRx2 first so the DAC turns on at cycle 0; when already on,
-            // write NRx2 immediately before NRx4 (and skip it when already silent
-            // at $08 so DMG/CGB zombie mode cannot bump 0 -> 1 before trigger).
+            const std::uint8_t nrx2 = Nrx2(s, volume);
+            // Pan Docs: NRx2 is taken at the trigger; $V8 keeps the DAC on and
+            // the envelope still. When the DAC is off (!sh.active), write NRx2
+            // first so the DAC turns on at cycle 0; when already on, write it
+            // immediately before NRx4, and not at all when it already holds
+            // that byte (a write while the channel plays is a zombie write,
+            // which moves the volume until the trigger reloads it).
             if (!sh.active)
-                h.Write(base + 2, static_cast<std::uint8_t>((volume << 4) | 0x08));
+                h.Write(base + 2, nrx2);
+            if (channel == 0) {
+                const std::uint8_t nr10 = Nr10(s);
+                if (nr10 != nr10_) {
+                    h.Write(0xFF10, nr10);
+                    nr10_ = nr10;
+                }
+            }
             h.Write(base + 1, static_cast<std::uint8_t>((s.shape & 3) << 6));
             h.Write(base + 3, static_cast<std::uint8_t>(x & 0xFF));
-            if (sh.active && !(sh.volume == 0 && volume == 0))
-                h.Write(base + 2, static_cast<std::uint8_t>((volume << 4) | 0x08));
+            if (sh.active && nrx2 != sh.nrx2)
+                h.Write(base + 2, nrx2);
             h.Write(base + 4, static_cast<std::uint8_t>(0x80 | ((x >> 8) & 7)));
-            sh = { true, s.voice, s.period, volume, s.shape & 3 };
+            Took(sh, s, volume, s.shape & 3, nrx2);
+            sh.sweep = channel == 0 && nr10_ != 0;
         } else if (channel == 2) {
             WriteWave(h, s, true);
         } else {
             const int volume = Clamp(s.volume, 0, 15);
+            const std::uint8_t nrx2 = Nrx2(s, volume);
             if (!sh.active)
-                h.Write(0xFF21, static_cast<std::uint8_t>((volume << 4) | 0x08));
+                h.Write(0xFF21, nrx2);
             h.Write(0xFF22, static_cast<std::uint8_t>(s.period));
-            if (sh.active && !(sh.volume == 0 && volume == 0))
-                h.Write(0xFF21, static_cast<std::uint8_t>((volume << 4) | 0x08));
+            if (sh.active && nrx2 != sh.nrx2)
+                h.Write(0xFF21, nrx2);
             h.Write(0xFF23, 0x80);
-            sh = { true, s.voice, s.period, volume, s.shape & 1 };
+            Took(sh, s, volume, s.shape & 1, nrx2);
         }
     }
 
     // A held note's new settings, written as a sound driver writes them
-    // between triggers: only what changed, the volume by zombie steps.
+    // between triggers: only what changed, the volume by zombie steps. The
+    // envelope unit takes NRx2 only at a trigger, and once it has run the
+    // volume is no longer the one zombie steps count from, so a new
+    // envelope, or none after one, starts the channel again; while one runs
+    // the volume is the chip's. A sweeping CH1's period is the sweep's.
     void Change(Handheld& h, int channel, const ChannelSettings& s) noexcept {
         Shadow& sh = shadow_[channel];
-        if (!sh.active) {
+        if (!sh.active || (channel != 2 && NewEnvelope(sh, s))) {
             Start(h, channel, s);
             return;
         }
+        Sides(h, channel, s.spread);
         if (channel < 2) {
             const std::uint16_t base = channel == 0 ? 0xFF10 : 0xFF15;
             if ((s.shape & 3) != sh.shape) {
                 h.Write(base + 1, static_cast<std::uint8_t>((s.shape & 3) << 6));
                 sh.shape = s.shape & 3;
             }
-            if (s.period != sh.period) {
+            if (s.period != sh.period && !sh.sweep) {
                 const int x = 2048 - static_cast<int>(s.period);
                 h.Write(base + 3, static_cast<std::uint8_t>(x & 0xFF));
                 h.Write(base + 4, static_cast<std::uint8_t>((x >> 8) & 7));
                 sh.period = s.period;
             }
-            Zombie(h, base + 2, sh, Clamp(s.volume, 0, 15));
+            if (sh.pace == 0)
+                Zombie(h, base + 2, sh, Clamp(s.volume, 0, 15));
         } else if (channel == 2) {
             WriteWave(h, s, false);
         } else {
@@ -177,16 +212,22 @@ public:
                 h.Write(0xFF22, static_cast<std::uint8_t>(s.period));
                 sh.period = s.period;
             }
-            Zombie(h, 0xFF21, sh, Clamp(s.volume, 0, 15));
+            if (sh.pace == 0)
+                Zombie(h, 0xFF21, sh, Clamp(s.volume, 0, 15));
         }
     }
 
-    // Silence, keeping the DAC on (Pan Docs: turning a DAC off pops).
+    // Silence, keeping the DAC on (Pan Docs: turning a DAC off pops); after
+    // an envelope, by a trigger at volume 0.
     void Stop(Handheld& h, int channel) noexcept {
+        const Shadow& sh = shadow_[channel];
         ChannelSettings s;
-        s.voice = shadow_[channel].voice;
-        s.period = shadow_[channel].period;
-        s.shape = shadow_[channel].shape;
+        s.voice = sh.voice;
+        s.period = sh.period;
+        s.shape = sh.shape;
+        s.spread = sh.spread;
+        s.sweep = sh.sweepAmount;
+        s.sweepPace = sh.sweepPace;
         Change(h, channel, s);
     }
 
@@ -199,9 +240,71 @@ private:
         std::int64_t period = 0;
         int volume = 0;
         int shape = 0;
+        std::uint8_t nrx2 = 0;   // what NRx2 holds
+        int pace = 0;            // the envelope it was triggered with: the volume is the chip's while it runs
+        bool up = false;
+        bool spread = false;
+        bool sweep = false;      // CH1 sweeps: its period is the sweep's
+        int sweepAmount = 0, sweepPace = 0;
     };
 
     static int Clamp(int v, int lo, int hi) noexcept { return v < lo ? lo : v > hi ? hi : v; }
+
+    static int Pace(const ChannelSettings& s) noexcept { return Clamp(s.pace, 0, 7); }
+
+    // NRx2 for a trigger: the envelope from the volume at its pace, or $V8,
+    // which keeps the DAC on and the envelope still (Pan Docs). A falling
+    // envelope from 0 is no envelope: $00 would turn the DAC off.
+    static std::uint8_t Nrx2(const ChannelSettings& s, int volume) noexcept {
+        const int pace = volume == 0 && !s.up ? 0 : Pace(s);
+        return static_cast<std::uint8_t>((volume << 4) | (pace == 0 ? 0x08 : (s.up ? 0x08 : 0x00) | pace));
+    }
+
+    static bool NewEnvelope(const Shadow& sh, const ChannelSettings& s) noexcept {
+        const int pace = Pace(s);
+        return pace != sh.pace || (pace > 0 && s.up != sh.up);
+    }
+
+    static void Took(Shadow& sh, const ChannelSettings& s, int volume, int shape, std::uint8_t nrx2) noexcept {
+        sh.active = true;
+        sh.voice = s.voice;
+        sh.period = s.period;
+        sh.volume = volume;
+        sh.shape = shape;
+        sh.nrx2 = nrx2;
+        sh.pace = Pace(s);
+        sh.up = s.up;
+        sh.spread = s.spread;
+        sh.sweepAmount = s.sweep;
+        sh.sweepPace = s.sweepPace;
+    }
+
+    // NR10 (Pan Docs; spec): pace (1 to 7 ticks of 128 Hz) in bits 6-4,
+    // bit 3 set to subtract, the shift in bits 2-0. Each iteration the period
+    // register x becomes x +/- x >> shift: adding raises the pitch, and past
+    // 2047 the chip turns the channel off; subtracting lowers it. A step's
+    // size `amount` 1 to 7 is 8 - shift, so 7 moves the most. 0 is no sweep.
+    static std::uint8_t Nr10(const ChannelSettings& s) noexcept {
+        if (s.sweep == 0)
+            return 0x00;
+        const int amount = Clamp(s.sweep < 0 ? -s.sweep : s.sweep, 1, 7);
+        return static_cast<std::uint8_t>((Clamp(s.sweepPace, 1, 7) << 4) | (s.sweep < 0 ? 0x08 : 0x00) | (8 - amount));
+    }
+
+    // NR51's two bits for a channel (Pan Docs: bits 7-4 left, CH4 to CH1;
+    // bits 3-0 right), written when they change. Spread puts pulse 1 on the
+    // left and pulse 2 on the right (ours: the channels a chord is split
+    // across), the wave and the noise on both.
+    void Sides(Handheld& h, int channel, bool spread) noexcept {
+        const int left = !spread || channel != 1, right = !spread || channel != 0;
+        const int mask = 0x11 << channel;
+        const int bits = (left ? 0x10 << channel : 0) | (right ? 0x01 << channel : 0);
+        const std::uint8_t next = static_cast<std::uint8_t>((nr51_ & ~mask) | bits);
+        if (next != nr51_) {
+            h.Write(0xFF25, next);
+            nr51_ = next;
+        }
+    }
 
     static std::uint8_t Nr32Byte(int levelCode) noexcept {
         static constexpr std::uint8_t kCode[4] = { 0x00, 0x60, 0x40, 0x20 };
@@ -328,8 +431,10 @@ private:
     // Pan Docs: "write $08 to NRx2 to increment the volume" - the one zombie
     // write every unit agrees on; 15 of them lower it by one.
     static void Zombie(Handheld& h, std::uint16_t nrx2, Shadow& sh, int volume) noexcept {
-        for (int n = (volume - sh.volume) & 15; n > 0; --n)
+        for (int n = (volume - sh.volume) & 15; n > 0; --n) {
             h.Write(nrx2, 0x08);
+            sh.nrx2 = 0x08;
+        }
         sh.volume = volume;
     }
 
@@ -364,6 +469,8 @@ private:
     std::uint8_t isrLastNr32_ = 0;
     std::int64_t isrDue_ = 0;
     std::int64_t isrStepPeriod_ = 0;
+    std::uint8_t nr51_ = 0xFF;   // as Boot leaves it
+    std::uint8_t nr10_ = 0x00;
 };
 
 } // namespace protocodus::reboot

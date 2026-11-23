@@ -14,6 +14,10 @@
 //   playing the full piano compass on the cartridge chip itself.
 // - Namco 163 uses $F800 auto-increment burst writes; Sunsoft 5B writes its
 //   $C000 register latch only when the selected register changes.
+// - The chip's own units, when the playing layer asks for them: the APU's and
+//   the MMC5's envelopes (bit 4 of $4000 clear), restarted by the trigger,
+//   and the APU pulses' sweeps ($4001), written before a trigger, after which
+//   the driver leaves the pulse's period to its sweep.
 
 #include "../Boards/Console.h"
 #include "DriverTypes.h"
@@ -104,6 +108,25 @@ public:
     [[nodiscard]] static bool EightDuties(const Console& c, int channel) noexcept {
         return c.CartridgeType() == Console::kVrc6 && channel >= 4 && channel < 6;
     }
+
+    // The APU's envelope (NESdev, APU Envelope; spec): with bit 4 of $4000
+    // clear, a trigger starts it at 15 and every V + 1 quarter frames it falls
+    // a step (V the low nibble, so paces 1 to 16), to 0, or with bit 5 set
+    // back to 15 (bit 5 also halts the length counter). The quarter frame is
+    // a quarter of the 4-step sequence $4017 = $40 leaves (APU Frame
+    // Counter). The MMC5's pulses have the same unit on their own 241 Hz
+    // clock (Chips/Famicom.h). The triangle, the DMC and the other
+    // cartridges' channels have none here.
+    [[nodiscard]] static EnvelopeUnit EnvelopeOf(const Console& c, int channel) noexcept {
+        if (channel == 0 || channel == 1 || channel == 3)
+            return { 16, static_cast<double>(nes::kFrame[c.Apu().RegionIndex()][0].length) / 4.0, false, false, true };
+        if (c.CartridgeType() == Console::kMmc5 && (channel == kApuChannels || channel == kApuChannels + 1))
+            return { 16, static_cast<double>(famicom::Mmc5::kFramePeriod), false, false, true };
+        return {};
+    }
+
+    // The APU's pulses have sweeps; the MMC5's do not (NESdev, MMC5 audio).
+    [[nodiscard]] static bool HasSweep(int channel) noexcept { return channel == 0 || channel == 1; }
 
     [[nodiscard]] static int QuantizeVolume(int, Voice voice, double gain) noexcept {
         if (voice == Voice::Triangle)
@@ -203,9 +226,51 @@ private:
         int shape = -1;
         int mod = -1;
         int mult = 1;
+        int control = -1;        // what the channel's $4000 (or $5000) holds
+        int pace = 0;            // the envelope it was triggered with
+        bool loop = false;
+        int sweepRegister = 0x08;  // what $4001 holds, as Boot leaves it
+        bool sweep = false;      // the pulse sweeps: its period is the sweep's
     };
 
+    // $4000's low six bits (and $400C's, $5000's): the length counter halted
+    // and the volume constant, or the envelope at pace V + 1, looping with
+    // the halt bit.
+    static int ControlBits(const ChannelSettings& s, int volume) noexcept {
+        const int pace = Clamp(s.pace, 0, 16);
+        return pace == 0 ? 0x30 | volume : (s.loop ? 0x20 : 0x00) | (pace - 1);
+    }
+
+    // The length a trigger loads ($4003 bits 7-3): index 31 under the halt
+    // bit, where it does not count; else index 1, 254 half frames (APU
+    // Length Counter), longer than the slowest envelope's 240 quarter frames.
+    static int LengthBits(const ChannelSettings& s) noexcept {
+        return s.pace > 0 && !s.loop ? 0x08 : 0xF8;
+    }
+
+    static bool NewEnvelope(const Shadow& sh, const ChannelSettings& s) noexcept {
+        return s.pace > 0 && (Clamp(s.pace, 0, 16) != sh.pace || s.loop != sh.loop);
+    }
+
+    // $4001 (NESdev, APU Sweep; spec): enabled, the divider's period P (P + 1
+    // half frames), negate (the period falls, so the pitch rises), the shift.
+    // A step's size `amount` 1 to 7 is 8 - shift. No sweep is $08, negating
+    // with shift 0, which never mutes a low note (Boot).
+    static int SweepRegister(const ChannelSettings& s) noexcept {
+        if (s.sweep == 0)
+            return 0x08;
+        const int amount = Clamp(s.sweep < 0 ? -s.sweep : s.sweep, 1, 7);
+        return 0x80 | ((Clamp(s.sweepPace, 1, 8) - 1) << 4) | (s.sweep > 0 ? 0x08 : 0x00) | (8 - amount);
+    }
+
     static int Clamp(int v, int lo, int hi) noexcept { return v < lo ? lo : v > hi ? hi : v; }
+
+    static void Took(Shadow& sh, const ChannelSettings& s, int control) noexcept {
+        sh.control = control;
+        sh.pace = Clamp(s.pace, 0, 16);
+        sh.loop = s.loop;
+        sh.shape = s.shape & 3;
+    }
 
     static int QuantizeGain(double gain, int maxStep) noexcept {
         if (gain <= 0.0)
@@ -259,17 +324,27 @@ private:
         switch (channel) {
         case 0: case 1: {
             const std::uint16_t base = static_cast<std::uint16_t>(0x4000 + 4 * channel);
-            if (trigger || writtenVolume != sh.volume || (s.shape & 3) != sh.shape)
-                c.Write(base, static_cast<std::uint8_t>(((s.shape & 3) << 6) | 0x30 | writtenVolume));
-            if (trigger || s.period != sh.period) {
-                c.Write(base + 2, static_cast<std::uint8_t>(s.period & 0xFF));
-                // $4003 restarts the sequencer: a driver writes it only on a
-                // trigger or when the high bits change (the click of a
-                // vibrato across them is the chip's).
-                if (trigger || (s.period >> 8) != (sh.period >> 8))
-                    c.Write(base + 3, static_cast<std::uint8_t>(0xF8 | ((s.period >> 8) & 7)));
+            const bool restart = trigger || NewEnvelope(sh, s);
+            const int control = ((s.shape & 3) << 6) | ControlBits(s, writtenVolume);
+            if (restart || control != sh.control)
+                c.Write(base, static_cast<std::uint8_t>(control));
+            if (restart) {
+                const int sweep = SweepRegister(s);
+                if (sweep != sh.sweepRegister)
+                    c.Write(base + 1, static_cast<std::uint8_t>(sweep));
+                sh.sweepRegister = sweep;
+                sh.sweep = s.sweep != 0;
             }
-            sh.shape = s.shape & 3;
+            if (restart || (s.period != sh.period && !sh.sweep)) {
+                c.Write(base + 2, static_cast<std::uint8_t>(s.period & 0xFF));
+                // $4003 restarts the sequencer and the envelope: a driver
+                // writes it only on a trigger or when the high bits change
+                // (the click of a vibrato across them, and an envelope
+                // starting again there, are the chip's).
+                if (restart || (s.period >> 8) != (sh.period >> 8))
+                    c.Write(base + 3, static_cast<std::uint8_t>(LengthBits(s) | ((s.period >> 8) & 7)));
+            }
+            Took(sh, s, control);
             break;
         }
         case 2: {
@@ -288,15 +363,19 @@ private:
                 c.Write(0x400B, static_cast<std::uint8_t>(0xF8 | ((s.period >> 8) & 7)));
             break;
         }
-        case 3:
-            if (trigger || writtenVolume != sh.volume)
-                c.Write(0x400C, static_cast<std::uint8_t>(0x30 | writtenVolume));
-            if (trigger || s.period != sh.period || (s.shape & 1) != sh.shape)
+        case 3: {
+            const bool restart = trigger || NewEnvelope(sh, s);
+            const int control = ControlBits(s, writtenVolume);
+            if (restart || control != sh.control)
+                c.Write(0x400C, static_cast<std::uint8_t>(control));
+            if (restart || s.period != sh.period || (s.shape & 1) != sh.shape)
                 c.Write(0x400E, static_cast<std::uint8_t>(((s.shape & 1) << 7) | (s.period & 15)));
-            if (trigger)
-                c.Write(0x400F, 0xF8);
+            if (restart)
+                c.Write(0x400F, static_cast<std::uint8_t>(LengthBits(s)));
+            Took(sh, s, control);
             sh.shape = s.shape & 1;
             break;
+        }
         default:
             writtenVolume = WriteCartridge(c, channel, s, trigger);
             break;
@@ -337,14 +416,16 @@ private:
         case Console::kMmc5: {
             const int volume = Clamp(s.volume, 0, 15);
             const std::uint16_t base = static_cast<std::uint16_t>(0x5000 + 4 * k);
-            if (trigger || volume != sh.volume || (s.shape & 3) != sh.shape)
-                c.Write(base, static_cast<std::uint8_t>(((s.shape & 3) << 6) | 0x30 | volume));
-            if (trigger || s.period != sh.period) {
+            const bool restart = trigger || NewEnvelope(sh, s);
+            const int control = ((s.shape & 3) << 6) | ControlBits(s, volume);
+            if (restart || control != sh.control)
+                c.Write(base, static_cast<std::uint8_t>(control));
+            if (restart || s.period != sh.period) {
                 c.Write(base + 2, static_cast<std::uint8_t>(s.period & 0xFF));
-                if (trigger || (s.period >> 8) != (sh.period >> 8))
-                    c.Write(base + 3, static_cast<std::uint8_t>(0xF8 | ((s.period >> 8) & 7)));
+                if (restart || (s.period >> 8) != (sh.period >> 8))
+                    c.Write(base + 3, static_cast<std::uint8_t>(LengthBits(s) | ((s.period >> 8) & 7)));
             }
-            sh.shape = s.shape & 3;
+            Took(sh, s, control);
             return volume;
         }
         case Console::kN163: {

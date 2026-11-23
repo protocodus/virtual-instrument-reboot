@@ -13,7 +13,14 @@ int Clamp(int v, int lo, int hi) noexcept { return v < lo ? lo : v > hi ? hi : v
 int Round(double v) noexcept { return static_cast<int>(std::floor(v + 0.5)); }
 
 bool Same(const ChannelSettings& a, const ChannelSettings& b) noexcept {
-    return a.voice == b.voice && a.period == b.period && a.volume == b.volume && a.shape == b.shape && a.mod == b.mod;
+    return a.voice == b.voice && a.period == b.period && a.volume == b.volume && a.shape == b.shape && a.mod == b.mod
+        && a.pace == b.pace && a.up == b.up && a.loop == b.loop && a.sweep == b.sweep && a.sweepPace == b.sweepPace
+        && a.spread == b.spread;
+}
+
+// The pace code whose step is nearest `cycles`, within the unit's.
+int PaceFor(double cycles, const EnvelopeUnit& unit) noexcept {
+    return Clamp(Round(cycles / unit.cycles), 1, unit.paces);
 }
 
 } // namespace
@@ -66,6 +73,7 @@ void Engine::Apply(bool forceReset) {
     const bool wasDouble = double_;
     const double oldDetune = detune_;
     const int oldOrder = arpOrder_;
+    const int oldEnvelope = envelope_;
     const Controls& c = controls_;
     mode_ = Clamp(Round(c[kMode]), 0, 2);
     arpRate_ = Clamp(Round(c[kArpRate]), 1, 8);
@@ -77,6 +85,10 @@ void Engine::Apply(bool forceReset) {
     chip_ = c[kPolyChannels] >= 0.5;
     arpOrder_ = Clamp(Round(c[kArpOrder]), 0, 3);
     arpRetrigger_ = c[kArpRetrigger] >= 0.5;
+    envelope_ = Clamp(Round(c[kEnvelope]), 0, 2);
+    sweep_ = Clamp(Round(c[kSweep]), -7, 7);
+    sweepPace_ = Clamp(Round(c[kSweepPace]), 1, 8);
+    spread_ = c[kSides] >= 0.5;
     const int ticks = Clamp(Round(c[kDriverRate]), 1, 8);
     if (arpOrder_ != oldOrder)
         ArpAnchor();
@@ -155,7 +167,8 @@ void Engine::Apply(bool forceReset) {
     vibratoDelay_ = Round(c[kVibratoDelay] / 1000.0 * tickHz);
     glideFrames_ = Round(c[kGlide] / 1000.0 * tickHz);
     gain_ = std::pow(10.0, c[kVolume] / 20.0);
-    if (reset || oldMode != mode_ || oldPart != part_)
+    // A new envelope takes a trigger on the chip, so the held keys play again.
+    if (reset || oldMode != mode_ || oldPart != part_ || oldEnvelope != envelope_)
         Revoice(reset);
 }
 
@@ -528,6 +541,7 @@ int Engine::StartNote(int key, int velocity, bool maySteal) {
     // so that raising the sustain brings it back.
     for (int set = 0; set < Sets(); ++set) {
         Settle(n.set[set]);
+        BeginChip(best, set);
         ChannelSettings s;
         Compose(best, set, s);
         Send(best, set, s, true);
@@ -554,6 +568,7 @@ void Engine::Restart(Slot& n) const noexcept {
     for (Program& p : n.set) {
         p.stage = Stage::Attack;
         p.env = 0.0;
+        p.restart = true;
         Settle(p);
     }
 }
@@ -568,8 +583,36 @@ void Engine::ReleaseSlot(int slot) {
         p.stage = Stage::Released;
         p.from = p.env;
         Settle(p);
-        if (p.env <= 0.0)
+        if (!p.chip) {
+            if (p.env <= 0.0)
+                EndSet(slot, set);
+            continue;
+        }
+        // The release of a note the chip's unit plays. Under a frame it is
+        // cut. The handheld's unit falls from where it is at the release's
+        // pace, from a trigger, as a driver releases a note on it. The
+        // console's starts only from 15, so a falling envelope runs on to 0,
+        // and one that would not end (looping) goes to the driver's release
+        // from where it is.
+        const int unit = UnitOf(slot, set);
+        const int volume = ChipVolume(p, unit);
+        if (release_ < 1.0 || volume == 0) {
             EndSet(slot, set);
+        } else if (!p.chipFull) {
+            const Machine& m = machines_[unit];
+            const EnvelopeUnit u = m.EnvelopeOf(Channel(slot));
+            const double tick = static_cast<double>(periodNum_) / static_cast<double>(periodDen_);
+            p.chipFrom = volume, p.chipUp = false, p.chipLoop = false;
+            p.chipPace = PaceFor(release_ * tick / volume, u);
+            p.chipStep = p.chipPace * u.cycles;
+            p.chipAt = m.Now();
+            ChannelSettings s;
+            if (!Compose(slot, set, s))
+                s.volume = 0, s.pace = 0;
+            Send(slot, set, s, true);
+        } else if (p.chipLoop || p.chipUp) {
+            ToDriver(slot, set);
+        }
     }
 }
 
@@ -602,6 +645,81 @@ void Engine::End(int slot) {
     n.age = ++age_;
     if (mode_ == 0)
         retryPitch_ = true;
+}
+
+// Envelope Chip: what the note asks of the channel's own envelope unit
+// from its trigger. Attack climbs from 0 at the pace nearest a fifteenth of
+// its time, to 15 whatever the level, where the unit stops. Else the unit
+// falls from the level (the handheld's) or from 15 (the console's, whose
+// envelope starts nowhere else) at the pace nearest the step the driver's
+// own decay would take, and runs on past the sustain level to 0: a unit
+// stops only at an end (ours, README How it works). With nothing to fall
+// (Sustain 15) the driver holds the level as it does without.
+void Engine::BeginChip(int slot, int set) {
+    Slot& n = slots_[slot];
+    Program& p = n.set[set];
+    const Machine& m = machines_[UnitOf(slot, set)];
+    const int ch = Channel(slot);
+    const EnvelopeUnit u = m.EnvelopeOf(ch);
+    p.chip = false;
+    if (envelope_ == 0 || u.paces == 0)
+        return;
+    const double tick = static_cast<double>(periodNum_) / static_cast<double>(periodDen_);
+    int from = 15, pace = 0;
+    const bool up = attack_ >= 1.0 && u.climbs;
+    if (up) {
+        from = 0;
+        pace = PaceFor(attack_ * tick / 15.0, u);
+    } else {
+        if (u.fromVolume) {
+            const double touch = 1.0 - velocity_ * (1.0 - n.velocity / 127.0);
+            from = m.QuantizeVolume(ch, n.voice, level_ / 15.0 * touch);
+        }
+        if (from == 0 || sustain_ >= 15)
+            return;
+        pace = PaceFor(decay_ * tick / (from * (15 - sustain_) / 15.0), u);
+    }
+    p.chip = true;
+    p.chipFull = up || !u.fromVolume;
+    p.chipUp = up;
+    p.chipLoop = envelope_ == 2 && u.loops && !up;
+    p.chipFrom = from;
+    p.chipPace = pace;
+    p.chipStep = pace * u.cycles;
+    p.chipAt = m.Now();
+}
+
+// Where the unit's envelope is now, as the driver counts its steps from the
+// trigger (ours: it can be a step from the chip's own, whose steps fall on
+// the chip's sequencer, as any driver's own count could be).
+int Engine::ChipVolume(const Program& p, int unit) const noexcept {
+    const std::int64_t elapsed = machines_[unit].Now() - p.chipAt;
+    const std::int64_t steps = elapsed <= 0 ? 0 : static_cast<std::int64_t>(static_cast<double>(elapsed) / p.chipStep);
+    if (p.chipUp)
+        return steps >= 15 - p.chipFrom ? 15 : p.chipFrom + static_cast<int>(steps);
+    if (p.chipLoop)
+        return 15 - static_cast<int>((15 - p.chipFrom + steps) % 16);
+    return steps >= p.chipFrom ? 0 : p.chipFrom - static_cast<int>(steps);
+}
+
+// The driver takes a note from the unit where the unit has it: onto a
+// channel without one (a fallback), or to release a looping one.
+void Engine::ToDriver(int slot, int set) {
+    Slot& n = slots_[slot];
+    Program& p = n.set[set];
+    const int volume = ChipVolume(p, UnitOf(slot, set));
+    p.chip = false;
+    p.full = p.chipFull;
+    const double touch = 1.0 - velocity_ * (1.0 - n.velocity / 127.0);
+    const double share = p.full ? 1.0 : level_ / 15.0 * touch;
+    p.env = share > 0.0 ? std::min(15.0, volume / share) : 0.0;
+    if (n.gate) {
+        p.stage = Stage::Decay;
+    } else {
+        p.stage = Stage::Released;
+        p.from = p.env;
+    }
+    Settle(p);
 }
 
 // The envelope's moves that take no frame. A stage shorter than a frame
@@ -662,7 +780,8 @@ double Engine::Pitch(const Slot& n, int set) const {
 // and touch.
 double Engine::Gain(const Slot& n, int set) const noexcept {
     const double touch = 1.0 - velocity_ * (1.0 - n.velocity / 127.0);
-    const double gain = (level_ / 15.0) * touch * (n.set[set].env / 15.0);
+    const Program& p = n.set[set];
+    const double gain = (p.full ? 1.0 : (level_ / 15.0) * touch) * (p.env / 15.0);
     return gain < 0.0 ? 0.0 : gain > 1.0 ? 1.0 : gain;
 }
 
@@ -672,10 +791,21 @@ bool Engine::Compose(int slot, int set, ChannelSettings& s) const {
     const Slot& n = slots_[slot];
     const Machine& m = machines_[UnitOf(slot, set)];
     const int ch = Channel(slot);
+    const Program& p = n.set[set];
     s.voice = n.voice;
     s.shape = shape_ % m.Shapes(ch, n.voice);
     s.mod = mod_;
-    s.volume = m.QuantizeVolume(ch, n.voice, Gain(n, set));
+    s.sweep = sweep_;
+    s.sweepPace = sweepPace_;
+    s.spread = spread_;
+    if (p.chip) {
+        s.volume = ChipVolume(p, UnitOf(slot, set));
+        s.pace = p.chipPace;
+        s.up = p.chipUp;
+        s.loop = p.chipLoop;
+    } else {
+        s.volume = m.QuantizeVolume(ch, n.voice, Gain(n, set));
+    }
     if (m.PeriodFor(ch, n.voice, Pitch(n, set), s.shape, s.period))
         return true;
     s.period = n.started ? n.set[set].written.period : s.period;
@@ -730,6 +860,13 @@ bool Engine::HandOff(int slot) {
             for (int set = 0; set < Sets(); ++set) {
                 if (slots_[next].set[set].ended)
                     continue;
+                Program& p = slots_[next].set[set];
+                if (p.restart) {
+                    p.restart = false;
+                    BeginChip(next, set);
+                }
+                if (p.chip && machines_[UnitOf(next, set)].EnvelopeOf(c).paces == 0)
+                    ToDriver(next, set);
                 ChannelSettings s;
                 Compose(next, set, s);
                 Send(next, set, s, true);
@@ -743,10 +880,19 @@ bool Engine::HandOff(int slot) {
 // The set's unit is sent the note as it stands; a pitch its channel cannot
 // reach is written silent, at the period it last had.
 void Engine::WriteSet(int slot, int set) {
+    Program& p = slots_[slot].set[set];
+    // A step of the arpeggio that starts the envelope again starts the
+    // chip's unit again, by a trigger.
+    bool start = false;
+    if (p.restart) {
+        p.restart = false;
+        BeginChip(slot, set);
+        start = p.chip;
+    }
     ChannelSettings s;
     if (!Compose(slot, set, s))
-        s.volume = 0;
-    Send(slot, set, s, false);
+        s.volume = 0, s.pace = 0;
+    Send(slot, set, s, start);
 }
 
 // A command to every set's unit at once.
@@ -816,7 +962,8 @@ void Engine::Tick(int unit) {
         // A step's new envelope starts on this frame, as a new note's does.
         if (s != restarted)
             StepEnvelope(p);
-        if (p.env <= 0.0 && p.stage == Stage::Released) {
+        if (p.chip ? !n.gate && !p.chipUp && !p.chipLoop && ChipVolume(p, unit) == 0
+                   : p.env <= 0.0 && p.stage == Stage::Released) {
             EndSet(s, set);
             continue;
         }

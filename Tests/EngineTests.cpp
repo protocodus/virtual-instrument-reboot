@@ -1083,6 +1083,150 @@ void TestEnvelope() {
     }
 }
 
+// Envelope Chip, the sweeps and Sides: the chips' own units, played as a
+// driver plays them. The handheld's envelope steps every pace/64 s and its
+// sweep every pace/128 s (Pan Docs); the console's envelope every pace
+// quarter frames, 1/240 s on NTSC (NESdev). Levels are against a note at
+// full volume: the handheld's DAC is linear, so a level is its step over
+// 15; the console's pulse mixer gives 95.88 / (8128 / n + 100) (NESdev, "APU
+// Mixer").
+void TestChipUnits() {
+    constexpr double kRate = 48000.0;
+    const auto step = [](int board, double n) {
+        const auto pulse = [](double v) { return v > 0.0 ? 95.88 / (8128.0 / v + 100.0) : 0.0; };
+        return board == 0 ? n / 15.0 : pulse(n) / pulse(15.0);
+    };
+    const auto ms = [](double frames) { return frames * 70224.0 / 4194304.0 * 1000.0; };
+    const auto at = [&](double seconds) { return static_cast<std::size_t>(seconds * kRate); };
+    const auto level = [&](const Audio& a, double seconds) { return AcRms(a.left, at(seconds), at(seconds) + 960); };
+    for (int board = 0; board < 2; ++board) {
+        const std::string name = board == 0 ? "handheld" : "console";
+        const Audio full = Play(*Fresh(Plain(board)), { On(0, 69) }, 48000);
+        const double reference = level(full, 0.5);
+
+        // A decay to sustain 10 that the driver would hold at 10: the unit
+        // runs on to 0 under the held key. Its step is the driver's, 2/64 s
+        // on the handheld (Decay over 28/3 frames for its five steps) and 2
+        // quarter frames on the console at its 15 steps over 5 of 15 kept.
+        Controls c = Plain(board);
+        c[kSustain] = 10;
+        c[kDecay] = board == 0 ? ms(131072.0 * 5.0 / 70224.0) : 2.0 * 7457.5 * 5.0 / 1789773.0 * 1000.0;
+        const Audio driver = Play(*Fresh(c), { On(0, 69) }, 48000);
+        c[kEnvelope] = 1;
+        const Audio chip = Play(*Fresh(c), { On(0, 69) }, 48000);
+        Check(std::fabs(Db(level(driver, 0.7) / reference) - Db(step(board, 10.0))) < 0.3, name + ": the driver's decay does not hold at sustain 10");
+        Check(level(chip, 0.7) < 0.02 * reference, name + ": the chip's envelope does not run on to 0 under the held key");
+        Check(level(chip, 0.01) > 0.8 * reference, name + ": the chip's envelope does not start from the top");
+        const double time = board == 0 ? 0.25 : 0.1;            // 8 steps of the handheld's, 12 of the console's
+        const double expect = board == 0 ? 7.0 : 3.0;
+        Check(std::fabs(level(chip, time) / reference - step(board, expect)) < 1.6 / 15.0,
+              name + ": the chip's envelope is not at step " + std::to_string(static_cast<int>(expect)) + " (" + std::to_string(15.0 * level(chip, time) / reference) + ")");
+
+        // The level the unit starts from: the handheld's is the Level, the
+        // console's always 15.
+        c[kLevel] = 6;
+        const Audio low = Play(*Fresh(c), { On(0, 69) }, 4800);
+        const double start = level(low, 0.005) / reference;
+        Check(board == 0 ? std::fabs(start - step(0, 6.0)) < 0.05 : start > 0.9,
+              name + ": the chip's envelope starts from the wrong level (" + std::to_string(15.0 * start) + ")");
+
+        // Partition: the same samples in any blocks.
+        c[kLevel] = 15;
+        c[kSweep] = -2;
+        Check(Play(*Fresh(c), Phrase(), 48000, 256).left == Play(*Fresh(c), Phrase(), 48000, 61).left,
+              name + ": the chip's units differ with the block size");
+    }
+
+    // Looping, the console's: the envelope falls from 15 again and again
+    // while the key holds, where the handheld's (no loop) plays as Chip.
+    {
+        Controls c = Plain(1);
+        c[kSustain] = 0;
+        c[kDecay] = 50;
+        c[kEnvelope] = 2;
+        const auto e = Fresh(c);
+        const Audio a = Play(*e, { On(0, 69), Off(96000, 69) }, 120000);
+        double most = 0.0, least = 1.0e9;
+        for (double t = 1.5; t < 1.9; t += 0.01) {
+            most = std::max(most, AcRms(a.left, at(t), at(t) + 240));
+            least = std::min(least, AcRms(a.left, at(t), at(t) + 240));
+        }
+        const double reference = AcRms(Play(*Fresh(Plain(1)), { On(0, 69) }, 48000).left, at(0.5), at(0.5) + 960);
+        Check(most > 0.7 * reference && least < 0.2 * reference, "console: the looping envelope does not fall again and again");
+        Play(*e, {}, 48000);
+        Check(e->Sounding() == 0, "console: a looping envelope's note does not end after its release");
+    }
+
+    // The handheld's climb and its release: Attack over 14 frames is pace
+    // 1, 15 steps of 1/64 s from 0 to 15, whatever the Level; the release
+    // over 60 frames falls from 15 at pace 4 (15 steps of 4/64 s).
+    {
+        Controls c = Plain(0);
+        c[kLevel] = 6;
+        c[kAttack] = ms(14.0);
+        c[kRelease] = ms(60.0);
+        c[kEnvelope] = 1;
+        const auto e = Fresh(c);
+        const Audio a = Play(*e, { On(0, 69), Off(24000, 69) }, 72000);
+        const double reference = AcRms(Play(*Fresh(Plain(0)), { On(0, 69) }, 48000).left, at(0.5), at(0.5) + 960);
+        Check(std::fabs(level(a, 0.4) / reference - 1.0) < 0.05, "handheld: the chip's climb does not reach 15");
+        Check(std::fabs(level(a, 0.1) / reference - 6.0 / 15.0) < 1.6 / 15.0, "handheld: the chip's climb is not at step 6");
+        Check(std::fabs(level(a, 0.5 + 0.5) / reference - 7.0 / 15.0) < 1.6 / 15.0, "handheld: the chip's release is not at step 7");
+        Play(*e, {}, 24000);
+        Check(e->Sounding() == 0, "handheld: the chip's release does not end the note");
+    }
+
+    // The sweeps. The handheld's down by 1 (shift 7) at pace 7: x loses
+    // x >> 7 every 7/128 s, so A4's 1750 is 1631 after nine steps, 314 Hz.
+    // Up by 7 (shift 1) A4's 1750 + 875 is past 2047 at the trigger, and
+    // the chip turns the channel off. The console's up by 2 (shift 6) at
+    // pace 1, every half frame: A4's 253 falls by 253 >> 6 each, under 8
+    // within a second, where the sweep mutes it.
+    {
+        Controls c = Plain(0);
+        c[kSweep] = -1;
+        c[kSweepPace] = 8;
+        const Audio a = Play(*Fresh(c), { On(0, 69) }, 48000);
+        const double early = Measure(a.left, 440.0, kRate, at(0.005), at(0.05));
+        const double late = Measure(a.left, 314.0, kRate, at(0.5), at(0.54));
+        Check(std::fabs(Cents(early, 440.0)) < 10.0 && late < 330.0 && late > 290.0,
+              "handheld: the sweep down does not lower the pitch (" + std::to_string(early) + ", " + std::to_string(late) + " Hz)");
+        c[kSweep] = 7;
+        const Audio off = Play(*Fresh(c), { On(0, 69) }, 9600);
+        const double reference = AcRms(Play(*Fresh(Plain(0)), { On(0, 69) }, 9600).left, at(0.1), at(0.2));
+        // What is left is the DAC's step at the trigger, through the 5 Hz blocker.
+        Check(AcRms(off.left, at(0.1), at(0.2)) < 0.05 * reference, "handheld: the sweep's overflow does not turn the channel off");
+        Controls n = Plain(1);
+        n[kSweep] = 2;
+        n[kSweepPace] = 1;
+        const Audio up = Play(*Fresh(n), { On(0, 69) }, 96000);
+        const double after = Measure(up.left, 554.0, kRate, at(0.13), at(0.15));
+        Check(after > 500.0, "console: the sweep up does not raise the pitch (" + std::to_string(after) + " Hz)");
+        Check(AcRms(up.left, at(1.5), at(1.9)) < 1.0e-3, "console: the swept pulse is not muted under period 8");
+    }
+
+    // Sides: pulse 1 on the left only, pulse 2 on the right only (NR51
+    // $DE: bit 0 and bit 5 clear), and every channel back on both once off.
+    {
+        Controls c = Plain(0);
+        c[kBoards] = 1;
+        c[kSides] = 1;
+        const auto e = Fresh(c);
+        const Audio one = Play(*e, { On(0, 69) }, 9600);
+        Check(AcRms(one.right, at(0.1), at(0.2)) < 0.01 * AcRms(one.left, at(0.1), at(0.2)),
+              "handheld: Spread does not put pulse 1 on the left alone");
+        Play(*e, { On(0, 76) }, 9600);
+        Check(e->MachineAt(0).HandheldBoard().Chip().Panning() == 0xDE, "handheld: Spread's NR51 is not $DE");
+        c[kSides] = 0;
+        e->SetControls(c);
+        // The sides' 5 Hz blockers still settle from what each had before.
+        const Audio both = Play(*e, {}, 9600);
+        const double l = AcRms(both.left, at(0.1), at(0.2)), r = AcRms(both.right, at(0.1), at(0.2));
+        Check(e->MachineAt(0).HandheldBoard().Chip().Panning() == 0xFF && std::fabs(Db(l / r)) < 0.05,
+              "handheld: Sides back to both does not reach the held notes");
+    }
+}
+
 // A held note takes a new wave: the handheld's wave channel, which starts
 // again to take it, and the cartridge chips C and D, which take it as it is
 // written.
@@ -1339,6 +1483,7 @@ int main() {
     TestPedalAndPanic();
     TestReset();
     TestEnvelope();
+    TestChipUnits();
     TestHeldWaves();
     TestTouch();
     TestBounds();

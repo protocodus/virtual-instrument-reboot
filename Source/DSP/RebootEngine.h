@@ -131,7 +131,18 @@ private:
         int frames = 0;          // frames since the note began
         double phase = 0.0;      // vibrato, in cycles
         bool ended = false;      // its release has run out and its channel is stopped
+        bool full = false;       // the envelope is the channel's whole volume, not a share of the level and touch
         ChannelSettings written; // what the channel was last sent
+        // Envelope Chip: the channel's own envelope unit runs the note, and
+        // the driver keeps count of it from the trigger it gave (BeginChip).
+        bool chip = false;
+        bool restart = false;    // the next write triggers the channel and its envelope again
+        bool chipUp = false, chipLoop = false;
+        bool chipFull = false;   // the unit's volume is not the level's (it starts from 15 or climbs to it)
+        int chipFrom = 0;        // the volume the unit started from
+        int chipPace = 0;        // the unit's pace code
+        double chipStep = 0.0;   // the board's cycles a step takes at that pace
+        std::int64_t chipAt = 0; // the unit's cycle at the trigger
     };
 
     // A channel of a machine, the same channel of its Double unit, and the
@@ -177,6 +188,9 @@ private:
     void EndSet(int slot, int set);
     void End(int slot);
     void Settle(Program& p) const noexcept;
+    void BeginChip(int slot, int set);
+    [[nodiscard]] int ChipVolume(const Program& p, int unit) const noexcept;
+    void ToDriver(int slot, int set);
     void StepEnvelope(Program& p) const noexcept;
     [[nodiscard]] double Pitch(const Slot& n, int set) const;
     [[nodiscard]] double Gain(const Slot& n, int set) const noexcept;
@@ -236,6 +250,9 @@ private:
     int mode_ = 0, arpRate_ = 2, bendRange_ = 2;
     int arpOrder_ = 0, ticks_ = 1;
     bool arpRetrigger_ = true;
+    int envelope_ = 0;                  // Envelope: 0 driver, 1 chip, 2 chip looping
+    int sweep_ = 0, sweepPace_ = 4;
+    bool spread_ = false;               // Sides
     bool chip_ = false;                 // Poly channels: the chip's other pitched parts too
     double vibratoDepth_ = 0.0, velocity_ = 0.5, gain_ = 0.0;
     double bend_ = 0.0, wheel_ = 0.0, tune_ = 0.0;
