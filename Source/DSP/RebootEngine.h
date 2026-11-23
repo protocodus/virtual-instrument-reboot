@@ -105,6 +105,16 @@ public:
     [[nodiscard]] double Trim() const noexcept { return trim_; }
     // Notes holding a channel, released ones included.
     [[nodiscard]] int Sounding() const noexcept;
+    // What channel `channel` of the first set's machine `board` holds.
+    struct Holding {
+        bool busy;
+        int key;
+        Voice voice;
+    };
+    [[nodiscard]] Holding HoldingAt(int board, int channel) const noexcept {
+        const Slot& s = slots_[board * Machine::kMaxChannels + channel];
+        return { s.busy, s.key, s.voice };
+    }
 
 private:
     // Scoped: the controls kAttack and kDecay share the names.
@@ -141,6 +151,7 @@ private:
         int key = 0, velocity = 0;
         bool down = false;       // false: held only by the pedal
         bool waitingForPitch = false;  // Poly note-on fell outside both register ranges
+        std::uint64_t struck = 0;      // when it was struck: its place in Arp order's "as played"
     };
 
     // Slot s is on machine s / kMaxChannels, channel s % kMaxChannels; with
@@ -181,7 +192,10 @@ private:
         return (tickNum_[unit] + periodDen_ - 1) / periodDen_;
     }
     void Tick(int unit);
-    [[nodiscard]] const Key& NextArpKey(int after) const noexcept;
+    [[nodiscard]] std::int64_t ArpRank(const Key& k) const noexcept;
+    [[nodiscard]] const Key* ArpSeek(std::int64_t after, int sign) const noexcept;
+    const Key& NextArpKey(std::int64_t after) noexcept;
+    void ArpAnchor() noexcept;
     [[nodiscard]] int HeldIndex(int key) const noexcept;
 
     // The first set's units, then from kMaxBoards the Double set's.
@@ -207,7 +221,10 @@ private:
     int trimFramesLeft_ = 0;
     double frameHz_ = 60.0, vibratoStep_ = 0.0;
     int vibratoDelay_ = 0, glideFrames_ = 0;
-    int arpKey_ = 0, arpCount_ = 0;
+    int arpKey_ = 0, arpCount_ = 0;     // the key the arpeggio last played, and the ticks since
+    std::int64_t arpRank_ = 0;          // that key's place in the order (ArpRank)
+    bool arpUp_ = true;                 // up and down: the way it is going
+    std::uint64_t struck_ = 0;
     // A frame of every unit is periodNum_ / periodDen_ of its cycles; each
     // unit's next falls at tickNum_ / periodDen_, counted from its power-on.
     std::int64_t tickNum_[2 * kMaxBoards] {}, periodNum_ = 1, periodDen_ = 1;
@@ -217,6 +234,9 @@ private:
     bool double_ = false;
     double detune_ = 0.0;
     int mode_ = 0, arpRate_ = 2, bendRange_ = 2;
+    int arpOrder_ = 0, ticks_ = 1;
+    bool arpRetrigger_ = true;
+    bool chip_ = false;                 // Poly channels: the chip's other pitched parts too
     double vibratoDepth_ = 0.0, velocity_ = 0.5, gain_ = 0.0;
     double bend_ = 0.0, wheel_ = 0.0, tune_ = 0.0;
     bool pedal_ = false;

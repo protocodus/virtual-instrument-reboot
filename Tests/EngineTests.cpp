@@ -479,6 +479,73 @@ void TestVoices() {
         Play(*e, { On(0, 30) }, 2000);
         Check(e->Sounding() == 1 && e->MachineAt(0).HandheldBoard().Chip().DacOn(2), "the low key does not go to the wave channel");
     }
+    // Poly channels on: one machine plays a chord on its unlike voices. The
+    // part's channels come first and the others only once those are held,
+    // so a melody keeps its voice whatever its release.
+    {
+        Controls c = Plain(0);
+        c[kBoards] = 1;
+        {
+            const auto e = Fresh(c);
+            Play(*e, { On(0, 60), On(100, 64), On(200, 67) }, 2000);
+            Check(e->Sounding() == 2, "handheld, the part's channels: a third key finds a third voice");
+        }
+        c[kPolyChannels] = 1;
+        c[kRelease] = 2000;
+        const auto e = Fresh(c);
+        Play(*e, { On(0, 60), On(100, 64), On(200, 67) }, 2000);
+        const auto at = [&](int ch) { return e->HoldingAt(0, ch); };
+        Check(e->Sounding() == 3 && at(0).key == 60 && at(1).key == 64 && at(2).key == 67
+                  && at(0).voice == Voice::Pulse && at(2).voice == Voice::Wave,
+              "handheld, the chip's channels: the chord is not two pulses and the wave");
+        Play(*e, { On(0, 72) }, 2000);
+        Check(e->Sounding() == 3 && at(0).key == 72, "handheld, the chip's channels: a fourth key does not take the oldest");
+        Play(*e, { Off(0, 60), Off(0, 64), Off(0, 67), Off(0, 72) }, 48000 * 3);
+        Check(e->Sounding() == 0, "handheld, the chip's channels: the chord does not end");
+        Play(*e, { On(0, 60), Off(2000, 60), On(4000, 62), Off(6000, 62), On(8000, 64), Off(10000, 64), On(12000, 65) }, 14000);
+        Check(!at(2).busy && (at(0).key == 65 || at(1).key == 65),
+              "handheld, the chip's channels: a melody with a long release wanders onto the wave");
+    }
+    // The console's chord: two pulses and the triangle, then the cartridge's
+    // voices; the noise is no part of it.
+    {
+        Controls c = Plain(1);
+        c[kBoards] = 1;
+        c[kPolyChannels] = 1;
+        {
+            const auto e = Fresh(c);
+            Play(*e, { On(0, 60), On(100, 64), On(200, 67), On(300, 72) }, 2000);
+            Check(e->Sounding() == 3 && e->HoldingAt(0, 2).voice == Voice::Triangle && e->HoldingAt(0, 2).busy
+                      && !e->HoldingAt(0, 3).busy,
+                  "console, the chip's channels: the chord is not two pulses and the triangle");
+        }
+        c[kRevision] = 1;
+        c[kExpansion] = 1;
+        {
+            const auto e = Fresh(c);
+            std::vector<Event> ev;
+            for (int i = 0; i < 8; ++i)
+                ev.push_back(On(i * 100, 60 + i));
+            Play(*e, ev, 2000);
+            Check(e->Sounding() == 6, "console with expansion A, the chip's channels: "
+                                          + std::to_string(e->Sounding()) + " voices, not 6");
+        }
+        c[kPart] = 2;
+        {
+            const auto e = Fresh(c);
+            Play(*e, { On(0, 60), On(100, 64) }, 2000);
+            Check(e->Sounding() == 1, "the noise part spills onto pitched channels");
+        }
+        // With Double the second unit plays the same chord.
+        c[kPart] = 0;
+        c[kDouble] = 1;
+        {
+            const auto e = Fresh(c);
+            const Audio a = Play(*e, { On(0, 60), On(100, 64), On(200, 67) }, 24000);
+            Check(e->Sounding() == 3 && Rms(a.right, 12000, 24000) > 0.5 * Rms(a.left, 12000, 24000),
+                  "the chip's channels with Double: the second unit does not play the chord");
+        }
+    }
 }
 
 // Across the hardware pulse floor, Mono must keep gliding on the fallback
@@ -756,6 +823,97 @@ void TestModes() {
             const auto from = static_cast<std::size_t>(i * step + 600), to = static_cast<std::size_t>((i + 1) * step - 100);
             Check(std::fabs(Cents(Measure(a.left, f, 48000.0, from, to), f)) < 5.0, "arp: step " + std::to_string(i) + " off its key");
         }
+    }
+    // The arpeggio's order. Four keys struck out of order; after its first
+    // round the note walks each order's own round.
+    {
+        Controls c = Plain(0);
+        c[kBoards] = 1;
+        c[kMode] = 2;
+        c[kArpRate] = 2;
+        const std::vector<std::vector<int>> rounds = {
+            { 60, 64, 67, 72 }, { 72, 67, 64, 60 }, { 60, 64, 67, 72, 67, 64 }, { 60, 67, 64, 72 } };
+        for (int order = 0; order < 4; ++order) {
+            c[kArpOrder] = order;
+            const auto e = Fresh(c);
+            Play(*e, { On(0, 60), On(0, 67), On(0, 64), On(0, 72) }, 16);
+            // The keys the note takes, one entry a change.
+            std::vector<int> keys;
+            for (int i = 0; i < 2000; ++i) {
+                Play(*e, {}, 16);
+                const int key = e->HoldingAt(0, 0).key;
+                if (keys.empty() || keys.back() != key)
+                    keys.push_back(key);
+            }
+            const std::vector<int>& round = rounds[static_cast<std::size_t>(order)];
+            bool ok = keys.size() >= 3 * round.size();
+            // From the second round on, some rotation of the order's round.
+            std::size_t at = 0;
+            while (ok && at < round.size() && round[at] != keys[round.size()])
+                ++at;
+            for (std::size_t i = 0; ok && i < 2 * round.size(); ++i)
+                ok = keys[round.size() + i] == round[(at + i) % round.size()];
+            Check(ok, "arp order " + std::to_string(order) + ": the note does not walk its round");
+        }
+    }
+    // Arp retrigger off: a step moves the pitch and leaves the envelope, so
+    // a decay to silence runs out while the note keeps stepping.
+    {
+        Controls c = Plain(0);
+        c[kBoards] = 1;
+        c[kMode] = 2;
+        c[kArpRate] = 3;
+        c[kDecay] = 300;
+        c[kSustain] = 0;
+        double late[2] {};
+        for (int retrigger = 0; retrigger < 2; ++retrigger) {
+            c[kArpRetrigger] = retrigger;
+            const auto e = Fresh(c);
+            const Audio a = Play(*e, { On(0, 60), On(0, 64), On(0, 67) }, 48000);
+            late[retrigger] = Rms(a.left, 36000, 48000);
+            const int key = e->HoldingAt(0, 0).key;
+            Play(*e, {}, 4000);
+            Check(e->Sounding() == 1 && e->HoldingAt(0, 0).key != key, "arp: the note stops stepping");
+        }
+        Check(late[1] > 0.01 && late[0] < 1.0e-4, "arp retrigger off: the steps restart the envelope ("
+                                                      + std::to_string(late[0]) + " against " + std::to_string(late[1]) + ")");
+    }
+    // Driver rate: the driver's ticks a frame. The arpeggio counts ticks,
+    // so it steps as many times as often; times in ms stay where they are.
+    {
+        Controls c = Plain(0);
+        c[kBoards] = 1;
+        c[kMode] = 2;
+        c[kArpRate] = 1;
+        int steps[2] {};
+        for (int k = 0; k < 2; ++k) {
+            c[kDriverRate] = k ? 4 : 1;
+            const auto e = Fresh(c);
+            Play(*e, { On(0, 60), On(0, 64), On(0, 67) }, 16);
+            int last = -1;
+            for (int i = 0; i < 3000; ++i) {   // one second
+                Play(*e, {}, 16);
+                const int key = e->HoldingAt(0, 0).key;
+                steps[k] += key != last;
+                last = key;
+            }
+        }
+        Check(std::abs(steps[0] - 60) <= 2 && std::abs(steps[1] - 239) <= 3,
+              "driver rate: " + std::to_string(steps[0]) + " and " + std::to_string(steps[1]) + " arpeggio steps a second, not 60 and 239");
+        Controls d = Plain(0);
+        d[kBoards] = 1;
+        d[kAttack] = 400;
+        double half[2] {}, full[2] {};
+        for (int k = 0; k < 2; ++k) {
+            d[kDriverRate] = k ? 8 : 1;
+            const auto e = Fresh(d);
+            const Audio a = Play(*e, { On(0, 69) }, 48000);
+            half[k] = Rms(a.left, 9600 - 480, 9600 + 480);    // 200 ms in: near half way
+            full[k] = Rms(a.left, 28800, 38400);
+        }
+        Check(std::fabs(full[1] / full[0] - 1.0) < 0.01 && std::fabs(half[1] / half[0] - 1.0) < 0.15
+                  && half[0] > 0.3 * full[0] && half[0] < 0.7 * full[0],
+              "driver rate: a 400 ms attack is not where it was at 8 ticks a frame");
     }
 }
 

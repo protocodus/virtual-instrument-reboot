@@ -190,6 +190,29 @@ public:
             // The detune parts the two sets, so it is heard only with Double.
             with({ { kDouble, 1 } });
             break;
+        case kArpOrder:
+            with({ { kMode, 2 } });
+            if (static_cast<int>(FromNormalized(static_cast<int>(index), value) + 0.5) == 3) {
+                rule.reach = Reach::Exempt;
+                rule.reason = "the held chord and the probes strike their keys upward, so the order they were played "
+                              "in is the upward one; Reboot.Engine's arp order check strikes four keys out of order";
+            }
+            break;
+        case kArpRetrigger:
+            // Heard where the envelope has somewhere to go on each step.
+            with({ { kMode, 2 }, { kDecay, 150 }, { kSustain, 3 } });
+            break;
+        case kDriverRate:
+            // Heard in how finely the vibrato's pitch is stepped.
+            with({ { kVibratoDepth, 50 } });
+            break;
+        case kPolyChannels:
+            // One machine's two pulses hold two of the chord's notes; the
+            // third goes to the wave channel or takes a pulse.
+            with({ { kBoards, 1 } });
+            rule.reach = Reach::NewNotes;
+            rule.reason = "it chooses the channel a note takes when its key is struck";
+            break;
         default:
             break;
         }

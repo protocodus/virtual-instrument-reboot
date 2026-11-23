@@ -39,7 +39,7 @@ enum Control : int {
     kMod,               // the expansion D wave's modulation depth, 0 to 63
     // Playing.
     kMode,              // 0 Poly, 1 Mono, 2 Arp
-    kArpRate,           // frames a step of the arpeggio holds
+    kArpRate,           // the driver's ticks a step of the arpeggio holds (a tick is a video frame at Driver rate 1)
     kVibratoDepth,      // cents either way; the mod wheel adds up to 50 more
     kVibratoRate,       // Hz
     kVibratoDelay,      // ms from a note's start before the vibrato begins
@@ -50,6 +50,11 @@ enum Control : int {
     kDouble,            // 0 one set of units; 1 a second set of the same board too, the first left and the second right
     kDetune,            // cents the two sets' crystals are pulled apart with Double, half of it either way
     kVolume,            // output level, dB: our trim after the machines (README, How it works)
+    // Added in 0.6.0, each at the value that plays as 0.5.2 did.
+    kPolyChannels,      // Poly's channels: 0 the part's; 1 the chip's other pitched channels too, once the part's are held
+    kArpOrder,          // the arpeggio's order: 0 up, 1 down, 2 up and down, 3 as played
+    kArpRetrigger,      // 1 each step of the arpeggio starts the envelope again; 0 it moves the pitch only
+    kDriverRate,        // the driver's ticks a video frame, 1 to 8: its envelope, vibrato, glide and arpeggio move that often
     kControlCount
 };
 
@@ -95,6 +100,10 @@ inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "double", "Double", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
     { "detune", "Detune", 0.0, 50.0, 8.0, 0, Curve::kLinear, "cents" },
     { "volume", "Volume", -24.0, 6.0, 0.0, 0, Curve::kLinear, "dB" },
+    { "poly_channels", "Poly channels", 0.0, 1.0, 0.0, 2, Curve::kStepped, "" },
+    { "arp_order", "Arp order", 0.0, 3.0, 0.0, 4, Curve::kStepped, "" },
+    { "arp_retrigger", "Arp retrigger", 0.0, 1.0, 1.0, 2, Curve::kStepped, "" },
+    { "driver_rate", "Driver rate", 1.0, 8.0, 1.0, 8, Curve::kStepped, "ticks" },
 } };
 
 // The value of control `index` at normalised position n (clamped to 0..1).

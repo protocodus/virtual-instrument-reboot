@@ -53,7 +53,7 @@ void Engine::SetControls(const Controls& raw) {
     if (c.value == controls_.value)
         return;
     retryPitch_ |= c[kTranspose] != controls_[kTranspose] || c[kFine] != controls_[kFine]
-        || c[kBendRange] != controls_[kBendRange];
+        || c[kBendRange] != controls_[kBendRange] || c[kPolyChannels] != controls_[kPolyChannels];
     controls_ = c;
     Apply(false);
 }
@@ -65,6 +65,7 @@ void Engine::Apply(bool forceReset) {
     const int oldBoards = boards_, oldMode = mode_, oldPart = part_;
     const bool wasDouble = double_;
     const double oldDetune = detune_;
+    const int oldOrder = arpOrder_;
     const Controls& c = controls_;
     mode_ = Clamp(Round(c[kMode]), 0, 2);
     arpRate_ = Clamp(Round(c[kArpRate]), 1, 8);
@@ -73,6 +74,12 @@ void Engine::Apply(bool forceReset) {
     velocity_ = c[kVelocity];
     double_ = c[kDouble] >= 0.5;
     detune_ = c[kDetune];
+    chip_ = c[kPolyChannels] >= 0.5;
+    arpOrder_ = Clamp(Round(c[kArpOrder]), 0, 3);
+    arpRetrigger_ = c[kArpRetrigger] >= 0.5;
+    const int ticks = Clamp(Round(c[kDriverRate]), 1, 8);
+    if (arpOrder_ != oldOrder)
+        ArpAnchor();
     part_ = Clamp(Round(c[kPart]), 0, Machine::kParts - 1);
     shape_ = Clamp(Round(c[kShape]), 0, 7);
     level_ = Clamp(Round(c[kLevel]), 0, 15);
@@ -101,13 +108,6 @@ void Engine::Apply(bool forceReset) {
         for (int u = 0; u < 2 * kMaxBoards; ++u)
             if (Active(u))
                 machines_[u].Reset(settings_, Pull(u / kMaxBoards));
-        // The frame is the board's as reset, not as it was.
-        machines_[0].FramePeriod(periodNum_, periodDen_);
-        for (int u = 0; u < 2 * kMaxBoards; ++u)
-            if (Active(u))
-                Pace(u);
-        // The driver knows only the nominal clock.
-        frameHz_ = machines_[0].ClockHz() * static_cast<double>(periodDen_) / static_cast<double>(periodNum_);
     } else {
         for (int u = 0; u < 2 * kMaxBoards; ++u) {
             if (!Active(u))
@@ -117,6 +117,22 @@ void Engine::Apply(bool forceReset) {
             if (detune_ != oldDetune)
                 machines_[u].SetTrim(Pull(u / kMaxBoards));
         }
+    }
+    // The driver ticks Driver rate times a frame of the board as reset, on
+    // the nominal clock, which is all it knows; its ticks run on from each
+    // unit's power-on. More than one a frame is a driver on a timer
+    // interrupt, which both machines have (the handheld's timer, Pan Docs
+    // "Timer and Divider Registers"; on the console a cartridge's cycle
+    // counter or the DMC's IRQ), as LSDj's FAST mode and an NSF's
+    // play-speed field use; whole ticks a frame are ours.
+    if (reset || ticks != ticks_) {
+        ticks_ = ticks;
+        machines_[0].FramePeriod(periodNum_, periodDen_);
+        frameHz_ = machines_[0].ClockHz() * static_cast<double>(periodDen_) / static_cast<double>(periodNum_);
+        periodDen_ *= ticks_;
+        for (int u = 0; u < 2 * kMaxBoards; ++u)
+            if (Active(u))
+                Pace(u);
     }
     const Machine& m = machines_[0];
     const Part part = m.PartOf(part_);
@@ -130,12 +146,14 @@ void Engine::Apply(bool forceReset) {
         trimFramesLeft_ = duration;
         trim_ = targetTrim;
     }
-    attack_ = c[kAttack] / 1000.0 * frameHz_;
-    decay_ = c[kDecay] / 1000.0 * frameHz_;
-    release_ = c[kRelease] / 1000.0 * frameHz_;
-    vibratoStep_ = c[kVibratoRate] / frameHz_;
-    vibratoDelay_ = Round(c[kVibratoDelay] / 1000.0 * frameHz_);
-    glideFrames_ = Round(c[kGlide] / 1000.0 * frameHz_);
+    // The driver holds its times in ticks.
+    const double tickHz = frameHz_ * ticks_;
+    attack_ = c[kAttack] / 1000.0 * tickHz;
+    decay_ = c[kDecay] / 1000.0 * tickHz;
+    release_ = c[kRelease] / 1000.0 * tickHz;
+    vibratoStep_ = c[kVibratoRate] / tickHz;
+    vibratoDelay_ = Round(c[kVibratoDelay] / 1000.0 * tickHz);
+    glideFrames_ = Round(c[kGlide] / 1000.0 * tickHz);
     gain_ = std::pow(10.0, c[kVolume] / 20.0);
     if (reset || oldMode != mode_ || oldPart != part_)
         Revoice(reset);
@@ -164,8 +182,9 @@ void Engine::Revoice(bool reset) {
         break;
     }
     default: {
+        arpUp_ = true;
         const Key& first = NextArpKey(-1);
-        arpKey_ = first.key, arpCount_ = 0;
+        arpKey_ = first.key, arpRank_ = ArpRank(first), arpCount_ = 0;
         mono_ = StartNote(first.key, first.velocity);
         break;
     }
@@ -223,19 +242,47 @@ int Engine::HeldIndex(int key) const noexcept {
     return -1;
 }
 
-// Next ascending pitch, wrapping to the lowest. Live chord edits do not
-// move the cursor: it remembers the last played pitch, not its array index.
-const Engine::Key& Engine::NextArpKey(int after) const noexcept {
-    const Key* lowest = &held_[0];
-    const Key* next = nullptr;
+// A held key's place in the arpeggio's order, never below 0: its pitch (up,
+// and up and down), its pitch from the top (down) or when it was struck
+// (as played).
+std::int64_t Engine::ArpRank(const Key& k) const noexcept {
+    return arpOrder_ == 1 ? 127 - k.key : arpOrder_ == 3 ? static_cast<std::int64_t>(k.struck) : k.key;
+}
+
+// The held key nearest past rank `after`, upward (sign 1) or downward (-1).
+const Engine::Key* Engine::ArpSeek(std::int64_t after, int sign) const noexcept {
+    const Key* best = nullptr;
     for (int i = 0; i < heldCount_; ++i) {
-        const Key& k = held_[i];
-        if (k.key < lowest->key)
-            lowest = &k;
-        if (k.key > after && (!next || k.key < next->key))
-            next = &k;
+        const std::int64_t r = sign * ArpRank(held_[i]);
+        if (r > sign * after && (!best || r < sign * ArpRank(*best)))
+            best = &held_[i];
     }
-    return next ? *next : *lowest;
+    return best;
+}
+
+// The next held key after rank `after`, wrapping to the first; up and down
+// turns at either end without playing it twice. Live chord edits do not
+// move the cursor: it remembers the last played key's rank, not its array
+// index. Needs a held key.
+const Engine::Key& Engine::NextArpKey(std::int64_t after) noexcept {
+    if (arpOrder_ != 2)
+        if (const Key* k = ArpSeek(after, 1))
+            return *k;
+    if (arpOrder_ == 2) {
+        if (const Key* k = ArpSeek(after, arpUp_ ? 1 : -1))
+            return *k;
+        arpUp_ = !arpUp_;
+        if (const Key* k = ArpSeek(after, arpUp_ ? 1 : -1))
+            return *k;
+    }
+    return *ArpSeek(-1, 1);
+}
+
+// A new order keeps the cursor on the key last played, so the next step is
+// its neighbour in the new order.
+void Engine::ArpAnchor() noexcept {
+    const int i = HeldIndex(arpKey_);
+    arpRank_ = i >= 0 ? ArpRank(held_[i]) : arpOrder_ == 1 ? 127 - arpKey_ : arpOrder_ == 3 ? 0 : arpKey_;
 }
 
 void Engine::NoteOn(int key, int velocity) {
@@ -246,7 +293,7 @@ void Engine::NoteOn(int key, int velocity) {
     }
     if (HeldIndex(key) >= 0)
         Lift(key);
-    held_[heldCount_++] = { key, Clamp(velocity, 1, 127), true };
+    held_[heldCount_++] = { key, Clamp(velocity, 1, 127), true, false, ++struck_ };
     Strike(held_[heldCount_ - 1]);
 }
 
@@ -350,7 +397,8 @@ void Engine::Strike(Key& note) {
         // runs joins it.
         if (mono_ >= 0 && slots_[mono_].gate)
             break;
-        arpKey_ = key, arpCount_ = 0;
+        arpKey_ = key, arpRank_ = ArpRank(note), arpCount_ = 0;
+        arpUp_ = true;
         if (mono_ >= 0)
             End(mono_);
         mono_ = StartNote(key, velocity);
@@ -417,34 +465,54 @@ void Engine::FollowHeld() {
 // oldest released note's, else the oldest note's. Returns the slot or -1.
 int Engine::StartNote(int key, int velocity, bool maySteal) {
     const Machine& m = machines_[0];
-    Part part = m.PartOf(part_);
-    if (part.count == 0)
+    const Part chosen = m.PartOf(part_);
+    if (chosen.count == 0)
         return -1;
     Slot probe;
     probe.key = key;
     const double hz = Pitch(probe, 0);
-    std::int64_t period = 0;
-    const bool fallback = !m.PeriodFor(part.first, part.voice, hz, shape_ % m.Shapes(part.first, part.voice), period);
-    if (fallback) {
-        part = m.FallbackOf(part);
-        if (part.count == 0
-            || !m.PeriodFor(part.first, part.voice, hz, shape_ % m.Shapes(part.first, part.voice), period))
-            return -1;
-    }
-
-    // A slot's rank: 0 free, 1 released, 2 held.
-    int best = -1, bestRank = 3;
-    std::uint64_t bestAge = 0;
-    for (int b = 0; b < boards_; ++b)
-        for (int ch = part.first; ch < part.first + part.count; ++ch) {
-            const int s = b * Machine::kMaxChannels + ch;
-            const Slot& n = slots_[s];
-            const int rank = !n.busy ? 0 : n.gate ? 2 : 1;
-            if (rank < bestRank || (rank == bestRank && n.age < bestAge))
-                best = s, bestRank = rank, bestAge = n.age;
+    const auto reaches = [&](const Part& p) {
+        std::int64_t period = 0;
+        return p.count > 0 && m.PeriodFor(p.first, p.voice, hz, shape_ % m.Shapes(p.first, p.voice), period);
+    };
+    // The parts that may take the key, in the order they are tried: the
+    // chosen one, or its fallback when it cannot reach the pitch; with Poly
+    // channels, in Poly, the chip's other pitched parts after it, as one
+    // machine plays a chord on its unlike voices (mGB's POLY channel plays
+    // the handheld's two pulses and wave so).
+    Part parts[Machine::kParts + 1];
+    int count = 0;
+    const bool fallback = !reaches(chosen);
+    const Part first = fallback ? m.FallbackOf(chosen) : chosen;
+    if (reaches(first))
+        parts[count++] = first;
+    if (mode_ == 0 && chip_ && chosen.voice != Voice::Noise)
+        for (int i = 0; i < Machine::kParts; ++i) {
+            const Part other = m.PartOf(i);
+            if (other.voice != Voice::Noise && other.first != first.first && other.first != chosen.first && reaches(other))
+                parts[count++] = other;
         }
+    if (count == 0)
+        return -1;
+
+    // A slot's rank: 0 free, 1 released, 2 held. A later part is taken only
+    // when every channel of the parts before it is held, so a melody keeps
+    // its voice and a chord spills onto the chip's others; when all are
+    // held, the oldest note of them all gives way.
+    int best = -1, bestRank = 3, bestPart = 0;
+    std::uint64_t bestAge = 0;
+    for (int p = 0; p < count && bestRank >= 2; ++p)
+        for (int b = 0; b < boards_; ++b)
+            for (int ch = parts[p].first; ch < parts[p].first + parts[p].count; ++ch) {
+                const int s = b * Machine::kMaxChannels + ch;
+                const Slot& n = slots_[s];
+                const int rank = !n.busy ? 0 : n.gate ? 2 : 1;
+                if (rank < bestRank || (rank == bestRank && n.age < bestAge))
+                    best = s, bestRank = rank, bestAge = n.age, bestPart = p;
+            }
     if (best < 0 || (!maySteal && bestRank != 0))
         return -1;
+    const Part part = parts[bestPart];
 
     End(best);
     Slot& n = slots_[best];
@@ -452,7 +520,9 @@ int Engine::StartNote(int key, int velocity, bool maySteal) {
     n.busy = true, n.gate = true;
     n.key = key, n.velocity = velocity;
     n.voice = part.voice;
-    n.fallback = fallback;
+    // Only the chosen part's fallback goes back to it when it can; a
+    // chord's spill stays on the voice it took.
+    n.fallback = fallback && bestPart == 0;
     n.age = ++age_;
     // A note at sustain 0 keeps its channel while the key holds it, silent,
     // so that raising the sustain brings it back.
@@ -711,15 +781,20 @@ void Engine::Tick(int unit) {
     int restarted = -1;
     if (unit == 0 && mode_ == 2 && heldCount_ > 0 && ++arpCount_ >= arpRate_) {
         arpCount_ = 0;
-        const Key& next = NextArpKey(arpKey_);
-        arpKey_ = next.key;
+        const Key& next = NextArpKey(arpRank_);
+        arpKey_ = next.key, arpRank_ = ArpRank(next);
         if (mono_ >= 0 && slots_[mono_].gate) {
-            Restart(slots_[mono_]);
+            // Without Arp retrigger a step moves the pitch only (LSDj keeps
+            // the two apart: its chord command moves the pitch, and a
+            // retrigger is another command).
+            if (arpRetrigger_)
+                Restart(slots_[mono_]);
             Retarget(next.key, next.velocity, false);
+            restarted = arpRetrigger_ ? mono_ : -1;
         } else {
             mono_ = StartNote(next.key, next.velocity);
+            restarted = mono_;
         }
-        restarted = mono_;
     }
     int writes[Machine::kMaxChannels];
     int count = 0;
