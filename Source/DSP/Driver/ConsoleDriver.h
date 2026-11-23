@@ -15,9 +15,11 @@
 // - Namco 163 uses $F800 auto-increment burst writes; Sunsoft 5B writes its
 //   $C000 register latch only when the selected register changes.
 // - The chip's own units, when the playing layer asks for them: the APU's and
-//   the MMC5's envelopes (bit 4 of $4000 clear), restarted by the trigger,
-//   and the APU pulses' sweeps ($4001), written before a trigger, after which
-//   the driver leaves the pulse's period to its sweep.
+//   the MMC5's envelopes (bit 4 of $4000 clear), restarted by the trigger;
+//   the disk unit's volume envelope ($4080 bit 7 clear), from the gain a
+//   direct write leaves; the 5B's one envelope (R11-R13), restarted by its
+//   shape; and the APU pulses' sweeps ($4001), written before a trigger,
+//   after which the driver leaves the pulse's period to its sweep.
 
 #include "../Boards/Console.h"
 #include "DriverTypes.h"
@@ -115,13 +117,26 @@ public:
     // back to 15 (bit 5 also halts the length counter). The quarter frame is
     // a quarter of the 4-step sequence $4017 = $40 leaves (APU Frame
     // Counter). The MMC5's pulses have the same unit on their own 241 Hz
-    // clock (Chips/Famicom.h). The triangle, the DMC and the other
-    // cartridges' channels have none here.
+    // clock (Chips/Famicom.h). The triangle, the DMC, the VRC6's and the
+    // 163's channels have none.
     [[nodiscard]] static EnvelopeUnit EnvelopeOf(const Console& c, int channel) noexcept {
         if (channel == 0 || channel == 1 || channel == 3)
             return { 16, static_cast<double>(nes::kFrame[c.Apu().RegionIndex()][0].length) / 4.0, false, false, true };
         if (c.CartridgeType() == Console::kMmc5 && (channel == kApuChannels || channel == kApuChannels + 1))
             return { 16, static_cast<double>(famicom::Mmc5::kFramePeriod), false, false, true };
+        // The disk unit's volume envelope (NESdev, FDS audio; spec): $4080
+        // with bit 7 clear moves the gain one step every 8 x (speed + 1) x
+        // (master + 1) cycles, up to 32 or down to 0, from the gain a direct
+        // write left; the master is $408A, the BIOS's $E8 (Boot).
+        if (c.CartridgeType() == Console::kFds && channel == kApuChannels)
+            return { 64, 8.0 * (0xE8 + 1), true, true, false, 32, false };
+        // The 5B's one envelope for its three channels (the AY-3-8910 data
+        // manual; spec): 32 steps of E x 16 cycles each (Chips/Ay8910.h), two
+        // to a volume step, so a volume step at period 1 is 32 cycles. Its
+        // shapes fall once ($09), climb once ($0D) or fall again and again
+        // ($08), always from the top or the bottom.
+        if (c.CartridgeType() == Console::k5B && channel >= kApuChannels && channel < kApuChannels + 3)
+            return { 0xFFFF, 32.0, true, false, true, 15, true };
         return {};
     }
 
@@ -228,6 +243,7 @@ private:
         int mult = 1;
         int control = -1;        // what the channel's $4000 (or $5000) holds
         int pace = 0;            // the envelope it was triggered with
+        bool up = false;
         bool loop = false;
         int sweepRegister = 0x08;  // what $4001 holds, as Boot leaves it
         bool sweep = false;      // the pulse sweeps: its period is the sweep's
@@ -249,7 +265,7 @@ private:
     }
 
     static bool NewEnvelope(const Shadow& sh, const ChannelSettings& s) noexcept {
-        return s.pace > 0 && (Clamp(s.pace, 0, 16) != sh.pace || s.loop != sh.loop);
+        return s.pace > 0 && (s.pace != sh.pace || s.up != sh.up || s.loop != sh.loop);
     }
 
     // $4001 (NESdev, APU Sweep; spec): enabled, the divider's period P (P + 1
@@ -267,9 +283,13 @@ private:
 
     static void Took(Shadow& sh, const ChannelSettings& s, int control) noexcept {
         sh.control = control;
-        sh.pace = Clamp(s.pace, 0, 16);
-        sh.loop = s.loop;
+        TookEnvelope(sh, s);
         sh.shape = s.shape & 3;
+    }
+    static void TookEnvelope(Shadow& sh, const ChannelSettings& s) noexcept {
+        sh.pace = s.pace;
+        sh.up = s.up;
+        sh.loop = s.loop;
     }
 
     static int QuantizeGain(double gain, int maxStep) noexcept {
@@ -486,8 +506,18 @@ private:
                 c.Write(0x4089, 0x00);
                 sh.shape = shape;
             }
-            if (trigger || volume != sh.volume)
+            // Its own envelope starts from the gain a direct write sets (a
+            // write in envelope mode leaves the gain as it is), and only a
+            // direct write takes it back.
+            if (s.pace > 0) {
+                if (trigger || NewEnvelope(sh, s)) {
+                    c.Write(0x4080, static_cast<std::uint8_t>(0x80 | volume));
+                    c.Write(0x4080, static_cast<std::uint8_t>((s.up ? 0x40 : 0x00) | (Clamp(s.pace, 1, 64) - 1)));
+                }
+            } else if (trigger || volume != sh.volume || sh.pace > 0) {
                 c.Write(0x4080, static_cast<std::uint8_t>(0x80 | volume));
+            }
+            TookEnvelope(sh, s);
             // The modulator at the carrier's own rate (its accumulator runs
             // on the same scale), depth from the part's mod (0-63).
             const int depth = Clamp(s.mod, 0, 63);
@@ -515,8 +545,22 @@ private:
                 S5BWrite(c, 2 * k, static_cast<std::uint8_t>(s.period & 0xFF));
                 S5BWrite(c, 2 * k + 1, static_cast<std::uint8_t>((s.period >> 8) & 15));
             }
-            if (trigger || volume != sh.volume)
+            // The envelope: its period, then the shape, whose write starts
+            // it, then the channel's M bit, so the channel takes it from its
+            // start. The playing layer has the chip's other channels off it
+            // first (RebootEngine.cpp, BeginChip).
+            if (s.pace > 0) {
+                if (trigger || NewEnvelope(sh, s)) {
+                    const int period = Clamp(s.pace, 1, 0xFFFF);
+                    S5BWrite(c, 11, static_cast<std::uint8_t>(period & 0xFF));
+                    S5BWrite(c, 12, static_cast<std::uint8_t>(period >> 8));
+                    S5BWrite(c, 13, s.up ? 0x0D : s.loop ? 0x08 : 0x09);
+                    S5BWrite(c, 8 + k, 0x10);
+                }
+            } else if (trigger || volume != sh.volume || sh.pace > 0) {
                 S5BWrite(c, 8 + k, static_cast<std::uint8_t>(volume));
+            }
+            TookEnvelope(sh, s);
             if (trigger) {
                 // Tone on (bit k clear), noise off, in the shared mixer.
                 s5bMixer_ = static_cast<std::uint8_t>((s5bMixer_ & ~(1 << k)) | (8 << k));

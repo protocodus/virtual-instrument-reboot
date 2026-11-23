@@ -289,6 +289,7 @@ public:
     }
 
     [[nodiscard]] const nes::Apu& Apu() const noexcept { return apu_; }
+    [[nodiscard]] const ay::Chip& S5B() const noexcept { return s5b_; }
     [[nodiscard]] int Revision() const noexcept { return revision_; }
     [[nodiscard]] int CartridgeType() const noexcept { return cartridge_; }
 

@@ -138,7 +138,8 @@ private:
         bool chip = false;
         bool restart = false;    // the next write triggers the channel and its envelope again
         bool chipUp = false, chipLoop = false;
-        bool chipFull = false;   // the unit's volume is not the level's (it starts from 15 or climbs to it)
+        bool chipFull = false;   // the unit's volume is not the level's (it starts from its top or climbs to it)
+        int chipTop = 15;        // the unit's top volume (EnvelopeUnit::top)
         int chipFrom = 0;        // the volume the unit started from
         int chipPace = 0;        // the unit's pace code
         double chipStep = 0.0;   // the board's cycles a step takes at that pace
@@ -191,6 +192,7 @@ private:
     void BeginChip(int slot, int set);
     [[nodiscard]] int ChipVolume(const Program& p, int unit) const noexcept;
     void ToDriver(int slot, int set);
+    void FreeUnit(int slot, int set);
     void StepEnvelope(Program& p) const noexcept;
     [[nodiscard]] double Pitch(const Slot& n, int set) const;
     [[nodiscard]] double Gain(const Slot& n, int set) const noexcept;

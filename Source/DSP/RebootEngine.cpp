@@ -648,13 +648,17 @@ void Engine::End(int slot) {
 }
 
 // Envelope Chip: what the note asks of the channel's own envelope unit
-// from its trigger. Attack climbs from 0 at the pace nearest a fifteenth of
-// its time, to 15 whatever the level, where the unit stops. Else the unit
-// falls from the level (the handheld's) or from 15 (the console's, whose
-// envelope starts nowhere else) at the pace nearest the step the driver's
-// own decay would take, and runs on past the sustain level to 0: a unit
-// stops only at an end (ours, README How it works). With nothing to fall
-// (Sustain 15) the driver holds the level as it does without.
+// from its trigger. Attack climbs from 0 at the pace nearest its time over
+// the unit's steps, to the unit's top whatever the level, where the unit
+// stops. Else the unit falls from the level (the handheld's and the disk
+// unit's) or from its top (the console's and the 5B's, whose envelopes
+// start nowhere else) at the pace nearest the step the driver's own decay
+// would take, and runs on past the sustain level to 0: a unit stops only
+// at an end (ours, README How it works). With nothing to fall (Sustain 15)
+// the driver holds the level as it does without. A unit the chip's
+// channels share (the 5B's) is the newest note's: the notes it played go
+// on under the driver from where they are (ours: a trigger restarts it on
+// every channel that listens to it).
 void Engine::BeginChip(int slot, int set) {
     Slot& n = slots_[slot];
     Program& p = n.set[set];
@@ -665,11 +669,11 @@ void Engine::BeginChip(int slot, int set) {
     if (envelope_ == 0 || u.paces == 0)
         return;
     const double tick = static_cast<double>(periodNum_) / static_cast<double>(periodDen_);
-    int from = 15, pace = 0;
+    int from = u.top, pace = 0;
     const bool up = attack_ >= 1.0 && u.climbs;
     if (up) {
         from = 0;
-        pace = PaceFor(attack_ * tick / 15.0, u);
+        pace = PaceFor(attack_ * tick / u.top, u);
     } else {
         if (u.fromVolume) {
             const double touch = 1.0 - velocity_ * (1.0 - n.velocity / 127.0);
@@ -679,10 +683,13 @@ void Engine::BeginChip(int slot, int set) {
             return;
         pace = PaceFor(decay_ * tick / (from * (15 - sustain_) / 15.0), u);
     }
+    if (u.shared)
+        FreeUnit(slot, set);
     p.chip = true;
     p.chipFull = up || !u.fromVolume;
     p.chipUp = up;
     p.chipLoop = envelope_ == 2 && u.loops && !up;
+    p.chipTop = u.top;
     p.chipFrom = from;
     p.chipPace = pace;
     p.chipStep = pace * u.cycles;
@@ -695,11 +702,30 @@ void Engine::BeginChip(int slot, int set) {
 int Engine::ChipVolume(const Program& p, int unit) const noexcept {
     const std::int64_t elapsed = machines_[unit].Now() - p.chipAt;
     const std::int64_t steps = elapsed <= 0 ? 0 : static_cast<std::int64_t>(static_cast<double>(elapsed) / p.chipStep);
+    const int top = p.chipTop;
     if (p.chipUp)
-        return steps >= 15 - p.chipFrom ? 15 : p.chipFrom + static_cast<int>(steps);
+        return steps >= top - p.chipFrom ? top : p.chipFrom + static_cast<int>(steps);
     if (p.chipLoop)
-        return 15 - static_cast<int>((15 - p.chipFrom + steps) % 16);
+        return top - static_cast<int>((top - p.chipFrom + steps) % (top + 1));
     return steps >= p.chipFrom ? 0 : p.chipFrom - static_cast<int>(steps);
+}
+
+// Every other note on the machine that a shared unit plays goes on under
+// the driver, before the unit is triggered again.
+void Engine::FreeUnit(int slot, int set) {
+    const int unit = UnitOf(slot, set);
+    const Machine& m = machines_[unit];
+    for (int other = 0; other < kSlots; ++other) {
+        if (other == slot || !slots_[other].busy || !slots_[other].started)
+            continue;
+        for (int k = 0; k < Sets(); ++k) {
+            Program& q = slots_[other].set[k];
+            if (q.ended || !q.chip || UnitOf(other, k) != unit || !m.EnvelopeOf(Channel(other)).shared)
+                continue;
+            ToDriver(other, k);
+            WriteSet(other, k);
+        }
+    }
 }
 
 // The driver takes a note from the unit where the unit has it: onto a
@@ -712,7 +738,7 @@ void Engine::ToDriver(int slot, int set) {
     p.full = p.chipFull;
     const double touch = 1.0 - velocity_ * (1.0 - n.velocity / 127.0);
     const double share = p.full ? 1.0 : level_ / 15.0 * touch;
-    p.env = share > 0.0 ? std::min(15.0, volume / share) : 0.0;
+    p.env = share > 0.0 ? std::min(15.0, 15.0 * volume / p.chipTop / share) : 0.0;
     if (n.gate) {
         p.stage = Stage::Decay;
     } else {

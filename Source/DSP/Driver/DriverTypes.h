@@ -29,7 +29,7 @@ struct ChannelSettings {
     int mod = 0;
     // The channel's own units, where it has them (Machine::EnvelopeOf,
     // Machine::HasSweep); a channel without one plays as if they were 0.
-    int pace = 0;         // its envelope unit steps the volume once every `pace` of its steps; 0: the volume stays as written
+    int pace = 0;         // its envelope unit steps the volume once every `pace` of its steps (the 5B's: its period); 0: the volume stays as written
     bool up = false;      // that envelope climbs; else it falls
     bool loop = false;    // a fallen envelope starts again from the top (the console's)
     int sweep = 0;        // its sweep unit's pitch steps from the start: 1 to 7 a step's size (8 - its shift), + up, - down; 0 none
@@ -42,8 +42,10 @@ struct EnvelopeUnit {
     int paces = 0;              // pace codes 1 to `paces`; 0: the channel has none
     double cycles = 0.0;        // the board's cycles one volume step takes at pace 1; pace n takes n times as long
     bool climbs = false;        // it can count up as well as down
-    bool fromVolume = false;    // it starts from the volume written; else always from 15
-    bool loops = false;         // it can start again from 15 when it reaches 0
+    bool fromVolume = false;    // it starts from the volume written; else always from the top
+    bool loops = false;         // it can start again from the top when it reaches 0
+    int top = 15;               // the volume it counts between 0 and: 15, the disk unit's gain 32
+    bool shared = false;        // one unit for all of its chip's channels (the 5B's): a trigger restarts it on each
 };
 
 // The whole period register nearest in pitch to an exact real one. Every

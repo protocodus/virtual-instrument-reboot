@@ -1227,6 +1227,87 @@ void TestChipUnits() {
     }
 }
 
+// The cartridge chips' own envelopes: the disk unit's (expansion D) from
+// the Level's gain, up to 32 or down to 0; the 5B's (expansion E) from its
+// top, shared by its three channels.
+void TestCartridgeUnits() {
+    constexpr double kRate = 48000.0;
+    constexpr double kCpu = 1789773.0;
+    const auto at = [&](double seconds) { return static_cast<std::size_t>(seconds * kRate); };
+    const auto level = [&](const Audio& a, double seconds) { return AcRms(a.left, at(seconds), at(seconds) + 240); };
+
+    // The disk unit: Decay 111 ms from gain 32 to Sustain 10 is 10.7 steps
+    // of 10.4 ms, speed 9 (pace 10, 8 x 10 x 233 cycles), so 9 steps at
+    // 0.1 s; at Level 6 it starts from gain 13.
+    {
+        Controls c = Plain(1, 3);
+        c[kRevision] = 1; // the Famicom: the cartridge's sound reaches the mix
+        c[kExpansion] = 4;
+        const double reference = level(Play(*Fresh(c), { On(0, 69) }, 48000), 0.5);
+        c[kSustain] = 10;
+        c[kDecay] = 111;
+        c[kEnvelope] = 1;
+        const Audio a = Play(*Fresh(c), { On(0, 69) }, 48000);
+        Check(std::fabs(level(a, 0.1) / reference - 23.0 / 32.0) < 1.6 / 32.0,
+              "disk unit: its envelope is not at gain 23 (" + std::to_string(32.0 * level(a, 0.1) / reference) + ")");
+        Check(level(a, 0.5) < 0.02 * reference, "disk unit: its envelope does not run on to 0 under the held key");
+        c[kLevel] = 6;
+        const Audio low = Play(*Fresh(c), { On(0, 69) }, 4800);
+        Check(std::fabs(level(low, 0.003) / reference - 13.0 / 32.0) < 1.1 / 32.0,
+              "disk unit: its envelope does not start from the Level's gain (" + std::to_string(32.0 * level(low, 0.003) / reference) + ")");
+        // A climb to 32 whatever the Level, and the release from there.
+        c[kAttack] = 200;
+        c[kRelease] = 200;
+        const auto e = Fresh(c);
+        const Audio up = Play(*e, { On(0, 69), Off(21600, 69) }, 24000);
+        Check(level(up, 0.03) < 0.5 * reference && std::fabs(level(up, 0.4) / reference - 1.0) < 0.05,
+              "disk unit: its envelope does not climb to 32");
+        Play(*e, {}, 24000);
+        Check(e->Sounding() == 0, "disk unit: the climbed note does not end after its release");
+        c[kAttack] = 0;
+        c[kLevel] = 15;
+        Check(Play(*Fresh(c), Phrase(), 48000, 256).left == Play(*Fresh(c), Phrase(), 48000, 61).left,
+              "disk unit: its envelope differs with the block size");
+    }
+
+    // The 5B: Decay 268 ms over its 15 volume steps is period 1000, 16000
+    // cycles an envelope step, 1.5 dB each on its DAC: 11 steps at 0.1 s.
+    // It starts from the top at any Level.
+    {
+        Controls c = Plain(1, 3);
+        c[kRevision] = 1; // the Famicom: the cartridge's sound reaches the mix
+        c[kExpansion] = 5;
+        const double reference = level(Play(*Fresh(c), { On(0, 69) }, 48000), 0.5);
+        c[kSustain] = 0;
+        c[kDecay] = 1000.0 * 32.0 * 15.0 / kCpu * 1000.0;
+        c[kEnvelope] = 1;
+        const Audio a = Play(*Fresh(c), { On(0, 69) }, 48000);
+        Check(std::fabs(Db(level(a, 0.1) / reference) + 16.5) < 1.5,
+              "5B: its envelope is not 11 steps down at 0.1 s (" + std::to_string(Db(level(a, 0.1) / reference)) + " dB)");
+        Check(level(a, 0.5) < 0.02 * reference, "5B: its envelope does not run on to 0 under the held key");
+        c[kLevel] = 6;
+        Check(level(Play(*Fresh(c), { On(0, 69) }, 4800), 0.003) > 0.8 * reference, "5B: its envelope does not start from the top");
+        c[kLevel] = 15;
+        Check(Play(*Fresh(c), Phrase(), 48000, 256).left == Play(*Fresh(c), Phrase(), 48000, 61).left,
+              "5B: its envelope differs with the block size");
+
+        // One envelope for three channels: the second note takes it, and the
+        // first goes on under the driver from where it was (5 steps down).
+        const auto e = Fresh(c);
+        Play(*e, { On(0, 69), On(4800, 76) }, 4900);
+        const ay::Chip& chip = e->MachineAt(0).ConsoleBoard().S5B();
+        int enveloped = 0, held = -1;
+        for (int k = 0; k < 3; ++k) {
+            if (chip.Register(8 + k) & 0x10)
+                ++enveloped;
+            else if (chip.Register(8 + k) != 0)
+                held = chip.Register(8 + k);
+        }
+        Check(enveloped == 1 && held >= 9 && held <= 10,
+              "5B: the newest note does not take the one envelope from the held one (" + std::to_string(enveloped) + ", " + std::to_string(held) + ")");
+    }
+}
+
 // A held note takes a new wave: the handheld's wave channel, which starts
 // again to take it, and the cartridge chips C and D, which take it as it is
 // written.
@@ -1484,6 +1565,7 @@ int main() {
     TestReset();
     TestEnvelope();
     TestChipUnits();
+    TestCartridgeUnits();
     TestHeldWaves();
     TestTouch();
     TestBounds();
