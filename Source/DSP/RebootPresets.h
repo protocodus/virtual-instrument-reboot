@@ -48,7 +48,7 @@ inline constexpr std::array<Preset, 8> kPresets { {
     { "Saw Lead", { { { kBoard, 1 }, { kRevision, 1 }, { kExpansion, 1 }, { kMode, 1 }, { kGlide, 30 },
                       { kVibratoDepth, 10 }, { kVibratoDelay, 200 }, { kPart, 4 }, { kLevel, 13 },
                       { kSustain, 15 }, { kRelease, 750 } } } },
-    { "Disk Organ", { { { kBoard, 1 }, { kRevision, 1 }, { kExpansion, 4 }, { kBoards, 4 }, { kPart, 3 },
+    { "Disk Organ", { { { kBoard, 1 }, { kRevision, 1 }, { kExpansion, 4 }, { kPart, 3 },
                         { kShape, 5 }, { kLevel, 15 }, { kAttack, 250 }, { kSustain, 15 }, { kRelease, 1000 },
                         { kMod, 12 } } } },
 } };

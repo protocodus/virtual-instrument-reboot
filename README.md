@@ -23,20 +23,20 @@ delayed vibrato, a gliding bass on the wave channel, an arpeggio on the
 Color's pulse whose every step starts the envelope again, and a groove on
 the noise channel; on the console, the triangle's bass, a gliding pulse
 doubled and detuned, the VRC6's sawtooth and the disk unit's modulated wave
-on four consoles.
+on six consoles.
 
 <!-- audio-demos-begin -->
 
 | # | Preset | Demo | Length | Peak |
 | --- | --- | --- | --- | --- |
-| 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -12.2 dBFS |
-| 2 | Wave Bass | [02-wave-bass.wav](Docs/audio/02-wave-bass.wav) | 8.4 s | -13.0 dBFS |
+| 1 | Square Lead | [01-square-lead.wav](Docs/audio/01-square-lead.wav) | 9.7 s | -12.1 dBFS |
+| 2 | Wave Bass | [02-wave-bass.wav](Docs/audio/02-wave-bass.wav) | 8.4 s | -11.6 dBFS |
 | 3 | Pocket Arp | [03-pocket-arp.wav](Docs/audio/03-pocket-arp.wav) | 10.4 s | -16.9 dBFS |
-| 4 | Static Snare | [04-static-snare.wav](Docs/audio/04-static-snare.wav) | 10.8 s | -15.7 dBFS |
-| 5 | Triangle Bass | [05-triangle-bass.wav](Docs/audio/05-triangle-bass.wav) | 8.3 s | -17.9 dBFS |
+| 4 | Static Snare | [04-static-snare.wav](Docs/audio/04-static-snare.wav) | 10.8 s | -15.8 dBFS |
+| 5 | Triangle Bass | [05-triangle-bass.wav](Docs/audio/05-triangle-bass.wav) | 8.3 s | -17.5 dBFS |
 | 6 | Pulse Glide | [06-pulse-glide.wav](Docs/audio/06-pulse-glide.wav) | 9.0 s | -19.2 dBFS |
 | 7 | Saw Lead | [07-saw-lead.wav](Docs/audio/07-saw-lead.wav) | 8.4 s | -18.8 dBFS |
-| 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -8.5 dBFS |
+| 8 | Disk Organ | [08-disk-organ.wav](Docs/audio/08-disk-organ.wav) | 10.2 s | -7.9 dBFS |
 
 <!-- audio-demos-end -->
 
@@ -47,6 +47,12 @@ Tools/update_readme_blocks.py demos --readme README.md --manifest
 WAVs are rendered and committed by hand after a change that alters them.
 
 ## Version history
+
+### 0.10.0 — 2026-11-26 — six-board chords, intra-board voice packing, and chip/driver fixes
+
+Boards defaults to 6 (Disk Organ with it), so every one of the twelve sounds plays six-voice chords out of the box, while untouched boards rest at zero cost. A Poly chord now fills a machine's own channels before taking another unit, so Handheld Pulse dyads pair CH1 and CH2 on one unit (and Left/Right with Sides Spread), Console Pulse chords share one 2A03's nonlinear pulse DAC, Sunsoft 5B triads drive one cartridge's saturating amplifier together, and Namco 163 chords pack onto one multiplexer first; separate single-note phrases still rotate across units.
+
+On the handheld, CGB `$FF76`/`$FF77` (`PCM12`/`PCM34`) read back the live digital channel nibbles (`0xFF` on DMG), `NRx2` zombie writes during the 64 Hz envelope clock's high phase (`divStep == 7`) reload the step timer (SameBoy), re-enabling a CMOS DAC clamps any remaining `50 us` floating turn-off tail instead of superposing onto the driven rail, and the DMG wave driver turns `NR30` off before active CH3 retriggers so rapid arpeggios never hit the 2-T-cycle Wave RAM corruption window. On the console, `$4015` tracks the 4-step frame interrupt and non-looping DMC sample-end interrupt flags, Namco 163 `$4800` auto-increment wraps `$7F -> $00`, and the disk unit's `$4088` modulation tables are exact zero-sum anti-symmetric sines folded across 1, 2 and 4 cycles with compensated depth so FM stays 1:1 harmonic up to C8 without counter drift.
 
 ### 0.9.0 — 2026-11-23 — Glide with Sync, and a Volume that does not click
 
@@ -288,15 +294,19 @@ reviewed, including the 0.5.1 pulse-sequencer audit, is in the
   first trigger plays as 0, duty position survives a trigger, pulse triggers
   keep the low two bits of the frequency timer, wave triggers play the previous
   sample buffer's high nibble before index 1, active CH3 Wave RAM writes/reads
-  are locked (DMG 2-T-cycle window) or redirected (CGB), CGB-04's zombie
+  are locked (DMG 2-T-cycle window) or redirected (CGB), CGB `$FF76`/`$FF77`
+  (`PCM12`/`PCM34`) digital output readback (`0xFF` on DMG), CGB-04's zombie
   volume writes (`NRx2` while a channel plays), DMG `NR52=0` length
   preservation, and, reported from SameBoy (Expat), CH3's 6-T-cycle trigger
-  delay, the 2-T-cycle DMG Wave RAM retrigger corruption window and the
+  delay, the 2-T-cycle DMG Wave RAM retrigger corruption window, the 64 Hz
+  envelope clock high-phase (`divStep == 7`) step-timer reload on `NRx2`
+  writes, and the
   original's zombie writes: each acts as two, the old value to `$FF` and then
   `$FF` to the new, counting the volume a step when a pace appears or `$x8`
   meets `$x8` and mirroring it when the direction turns. Revisions: the original (DMG) and the Color (CGB).
 - **DACs and mixer (spec, 50 us decay reported):** a DAC on maps 0 to 15 to
-  analog +1 to -1, off decays toward 0 over 50 us on Line; NR51 sends channels
+  analog +1 to -1, off decays toward 0 over 50 us on Line and clamps back to
+  the driven rail when re-enabled; NR51 sends channels
   to each side and NR50 scales the sides.
 - **Line (reported):** Pan Docs' coupling capacitor, driven continuously (with
   the 50 us DAC-off decay) at corners fitted to Herbert Weixelbaum's recordings
@@ -321,7 +331,8 @@ reviewed, including the 0.5.1 pulse-sequencer audit, is in the
 
 - **Chip (spec):** the NESdev Wiki's APU pages: two pulses with sweep, the
   triangle, the noise channel's two modes, the DMC's held level, the
-  envelopes, length counters, `$4015` readback and the frame counter, in CPU
+  envelopes, length counters, `$4015` status and frame/DMC interrupt flags,
+  and the frame counter, in CPU
   cycles at the NTSC 1789773 Hz (19687500 / 11) or the PAL 1662607 Hz, with
   the PAL 2A07's own noise and DMC period tables. A pulse period change that
   crosses the high bits writes $4003 or $4007, as a driver must, and the phase
@@ -443,8 +454,11 @@ machine blackbox.
   extended below 32 Hz (`A0`–`B0`) via a master-cycle `NR32` timer ISR over
   all-`$FF` Wave RAM (ours); the console's triangle below the pulses' 54.6 Hz.
   On FDS above ~1747 Hz and 8-channel Namco 163 above ~3728 Hz, the driver folds
-  multiple harmonic cycles into wavetable RAM so high notes up to C8 play on
-  the cartridge chip itself.
+  multiple harmonic cycles into wavetable RAM (and on FDS into zero-sum `$4088`
+  modulation tables with compensated depth so FM stays 1:1 harmonic) so high
+  notes up to C8 play on the cartridge chip itself. On DMG CH3, active
+  retriggers turn `NR30` off before re-enabling so rapid arpeggios never hit
+  the 2-T-cycle Wave RAM corruption window.
 - **Frames.** Everything that moves while a note sounds (the envelope's
   volume steps, vibrato, glide, the pitch wheel, the host's master tuning)
   is written at the unit's own frame, as a game's driver ran on its video
@@ -521,9 +535,12 @@ machine blackbox.
   pulse plays on the left only and its second on the right only, the wave
   and noise on both.
 - **Voices.** One voice plays up to eight machines of one board
-  (**Boards**), with its revision, expansion, bias and path. A note takes
-  the free channel of the part, on any of the machines, that was freed
-  longest ago, else the oldest released note's, else the oldest note's.
+  (**Boards**, 6 by default), with its revision, expansion, bias and path. A
+  chord packs onto the free channels of a machine already holding a key
+  before taking an idle machine (so pulses share one chip's mixer or stereo
+  sides and 5B/163 chords share one cartridge), while separate phrases take
+  whichever idle machine was freed longest ago; once all free channels are
+  taken, a note takes the oldest released note's, else the oldest note's.
   With **Poly channels** on, a Poly chord spills onto the chip's other
   pitched parts once every channel of the part is held, as one machine
   plays a chord on its unlike voices (mGB's POLY channel plays the
@@ -605,8 +622,7 @@ A cartridge's sound picks the Console revision whose slot carries it.
   trigger delay, the 2-T-cycle DMG Wave RAM retrigger corruption window and
   the 50 us DAC-off decay are reported from SameBoy (Expat/MIT) rather than
   our own hardware capture. SameBoy notes that `$x0` zombie writes "seem to
-  be non-deterministic" on the original, and it also reloads the envelope's
-  step timer when its clock is high, a phase our envelope does not model;
+  be non-deterministic" on the original;
   Pan Docs notes that DAC decay varies between handheld models. The Color's corners are one unit's,
   read from a published picture of its waveform rather than from its
   samples, and fits within 20 % of the best error span 132 to 216 Hz and

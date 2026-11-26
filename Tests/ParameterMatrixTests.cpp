@@ -137,9 +137,13 @@ public:
             with({ { kBoard, 1 } });
             break;
         case kBoards:
-            // One wave channel a machine, so every count changes how many of
-            // a three-note chord sound.
+            // One wave channel a machine: 1 and 2 hold fewer of the three-note
+            // chord than 6, and between counts from 3 up that hold them all
+            // what differs is which units' crystals and warm-ups take the
+            // chord, which follows the order the playing freed them since the
+            // last reset.
             with({ { kPart, 1 } });
+            rule.history = "which units take the chord follows the order the playing freed them since the last reset";
             break;
         case kShape:
             // The pulse has four duties, so 6 plays as the base's 2; the wave

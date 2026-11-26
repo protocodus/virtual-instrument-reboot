@@ -505,9 +505,23 @@ void TestDouble() {
 }
 
 void TestVoices() {
+    // Default setup (six boards): every sound in kSounds plays a full six-voice chord.
+    for (int i = 0; i < static_cast<int>(kSounds.size()); ++i) {
+        Controls c;
+        SetSound(c, i);
+        c[kSustain] = 15;
+        const auto e = Fresh(c);
+        std::vector<Event> ev;
+        for (int n = 0; n < 6; ++n)
+            ev.push_back(On(n * 64, 60 + 2 * n));
+        Play(*e, ev, 2000);
+        Check(e->Sounding() == 6, std::string(kSounds[static_cast<std::size_t>(i)].name)
+              + ": default 6-board setup plays " + std::to_string(e->Sounding()) + " voices, not 6");
+    }
     // Two machines' two pulses: four voices, the oldest stolen.
     {
         Controls c = Plain(0);
+        c[kBoards] = 2;
         const auto e = Fresh(c);
         std::vector<Event> ev;
         for (int i = 0; i < 6; ++i)
@@ -1786,6 +1800,84 @@ void TestAuthenticityEnhancements() {
         const int vrc6SawSteps = countSteps(1, 4, 0);
         Check(fdsSteps > 20, "FDS native 0..32 volume steps exceed 4-bit count: " + std::to_string(fdsSteps));
         Check(vrc6SawSteps > 25, "VRC6 Saw native 0..42 volume steps exceed 4-bit count: " + std::to_string(vrc6SawSteps));
+    }
+
+    // 5. Intra-board chord packing: after an odd number of staccato notes, a
+    // dyad on Handheld Pulse (Sides = Spread) still pairs CH1 (left) and CH2
+    // (right) on the same machine, and a 3-note chord on Sunsoft 5B packs all
+    // three voices onto one cartridge's nonlinear amplifier.
+    {
+        Controls c = Plain(0, 0, 2);
+        c[kSides] = 1;
+        c[kRelease] = 0;
+        auto e = Fresh(c, 48000.0);
+        Play(*e, { On(0, 60), Off(500, 60) }, 2000); // odd prior note
+        const Audio dyad = Play(*e, { On(0, 64), On(64, 67) }, 24000);
+        int packedBoards = 0;
+        for (int b = 0; b < e->Boards(); ++b)
+            if (e->HoldingAt(b, 0).busy && e->HoldingAt(b, 1).busy)
+                ++packedBoards;
+        Check(packedBoards == 1, "handheld pulse dyad after odd note must pack CH1+CH2 onto one board");
+        Check(Rms(dyad.left, 4000, 24000) > 0.02 && Rms(dyad.right, 4000, 24000) > 0.02,
+              "handheld Sides=Spread dyad must sound on both left and right");
+
+        Controls s5b = Plain(1, 3, 0);
+        s5b[kRevision] = 1;
+        s5b[kExpansion] = 5;
+        s5b[kRelease] = 0;
+        auto e5 = Fresh(s5b, 48000.0);
+        Play(*e5, { On(0, 55), Off(500, 55) }, 2000);
+        Play(*e5, { On(0, 60), On(32, 64), On(64, 67) }, 4000);
+        int triadsOnOne5B = 0;
+        for (int b = 0; b < e5->Boards(); ++b)
+            if (e5->HoldingAt(b, 4).busy && e5->HoldingAt(b, 5).busy && e5->HoldingAt(b, 6).busy)
+                ++triadsOnOne5B;
+        Check(triadsOnOne5B == 1, "5B triad must pack onto one cartridge's three tone channels");
+    }
+
+    // 6. DMG CH3 Wave RAM retrigger guard: rapid arpeggio/note retriggers on
+    // Original Handheld Wave must never corrupt Wave RAM.
+    {
+        Controls c = Plain(0, 1, 5); // Original DMG, Wave, Organ
+        c[kBoards] = 1;
+        c[kMode] = 2; // Arp with retrigger on
+        c[kArpRate] = 1;
+        c[kDriverRate] = 8;
+        auto e = Fresh(c, 48000.0);
+        std::vector<Event> ev { On(0, 60), On(11, 64), On(23, 67), On(37, 72) };
+        for (int i = 0; i < 120; ++i) {
+            ev.push_back(Off(500 + i * 313, 72));
+            ev.push_back(On(507 + i * 313, 72));
+        }
+        Play(*e, ev, 48000);
+        Handheld hh = e->MachineAt(0).HandheldBoard();
+        hh.Write(0xFF1A, 0x00);
+        hh.RunTo(hh.Now() + 64);
+        bool clean = true;
+        for (int i = 0; i < 16; ++i)
+            if (hh.Read(static_cast<std::uint16_t>(0xFF30 + i)) != kWaves[5].packed[i])
+                clean = false;
+        Check(clean, "DMG CH3 rapid retriggers corrupted Wave RAM");
+    }
+
+    // 7. FDS zero-drift modulator and high-octave 1:1 harmonic FM folding.
+    {
+        for (int midi : { 60, 96, 108 }) {
+            Controls c = Plain(1, 3, 0); // Sine carrier + FM
+            c[kRevision] = 1;
+            c[kExpansion] = 4;
+            c[kBoards] = 1;
+            c[kMod] = 16;
+            auto e = Fresh(c, 48000.0, 4);
+            const Audio a = Play(*e, { On(0, midi) }, 96000);
+            const double hz = 440.0 * std::pow(2.0, (midi - 69) / 12.0);
+            const double early = Measure(a.left, hz, 48000.0, 8000, 32000);
+            const double late = Measure(a.left, hz, 48000.0, 64000, 92000);
+            Check(early > 0.0 && std::fabs(Cents(early, hz)) < 15.0
+                      && late > 0.0 && std::fabs(Cents(late, hz)) < 15.0,
+                  "FDS Mod=16 MIDI " + std::to_string(midi) + " must keep 1:1 harmonic pitch without drift (early="
+                      + std::to_string(early) + " late=" + std::to_string(late) + " target=" + std::to_string(hz) + ")");
+        }
     }
 }
 

@@ -379,6 +379,11 @@ private:
                 waveRamShape_ = wantRamShape;
                 trigger = true;
             } else if (trigger) {
+                // Pan Docs ("Audio Quirks"; spec): triggering CH3 on DMG while
+                // it is active and within 2 T-cycles of a sample read corrupts
+                // Wave RAM; drivers turn NR30 off before re-enabling and triggering.
+                if (sh.active && h.Revision() == Handheld::kOriginal)
+                    h.Write(0xFF1A, 0x00);
                 h.Write(0xFF1A, 0x80);
             }
             if (trigger || wasIsr || volume != sh.volume)
@@ -404,6 +409,11 @@ private:
                 waveRamShape_ = wantRamShape;
                 trigger = true;
             } else if (trigger) {
+                // Pan Docs ("Audio Quirks"; spec): triggering CH3 on DMG while
+                // it is active and within 2 T-cycles of a sample read corrupts
+                // Wave RAM; drivers turn NR30 off before re-enabling and triggering.
+                if (sh.active && h.Revision() == Handheld::kOriginal)
+                    h.Write(0xFF1A, 0x00);
                 h.Write(0xFF1A, 0x80);
             }
             isrActive_ = volume > 0;

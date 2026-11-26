@@ -90,7 +90,7 @@ inline constexpr std::array<ControlInfo, kControlCount> kControlInfo { {
     { "expansion_channels", "Expansion channels", 1.0, 8.0, 4.0, 8, Curve::kStepped, "" },
     { "bias", "Bias", 0.0, 127.0, 0.0, 0, Curve::kInteger, "" },
     { "path", "Path", 0.0, 1.0, 1.0, 2, Curve::kStepped, "" },
-    { "boards", "Boards", 1.0, 8.0, 2.0, 8, Curve::kStepped, "" },
+    { "boards", "Boards", 1.0, 8.0, 6.0, 8, Curve::kStepped, "" },
     { "part", "Part", 0.0, 4.0, 0.0, 5, Curve::kStepped, "" },
     { "shape", "Shape", 0.0, 7.0, 2.0, 8, Curve::kStepped, "" },
     { "level", "Level", 0.0, 15.0, 12.0, 0, Curve::kInteger, "" },

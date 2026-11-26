@@ -475,6 +475,57 @@ void TestGameBoy() {
         dmg.Write(0xFF14, 0xC6, sink); // trigger with length enabled
         dmg.Run(16384, sink);
         Check((dmg.Read(0xFF26) & 1) == 0, "dmg length written while powered off did not expire");
+        Check(dmg.Read(0xFF76) == 0xFF && dmg.Read(0xFF77) == 0xFF, "dmg $FF76/$FF77 must read $FF");
+
+        // CGB PCM12 ($FF76) and PCM34 ($FF77) digital output readback (Pan Docs).
+        gb::Apu pcm;
+        pcm.Reset(gb::Model::Cgb);
+        pcm.Write(0xFF26, 0x80, sink);
+        for (int i = 0; i < 16; ++i)
+            pcm.Write(static_cast<std::uint16_t>(0xFF30 + i), 0xCC, sink);
+        pcm.Write(0xFF1A, 0x80, sink);
+        pcm.Write(0xFF1C, 0x20, sink);
+        pcm.Write(0xFF1D, 0xF0, sink);
+        pcm.Write(0xFF1E, 0x87, sink);
+        pcm.Write(0xFF11, 0xC0, sink);
+        pcm.Write(0xFF12, 0x98, sink);
+        pcm.Write(0xFF14, 0x87, sink);
+        pcm.Write(0xFF16, 0xC0, sink);
+        pcm.Write(0xFF17, 0x58, sink);
+        pcm.Write(0xFF19, 0x87, sink);
+        pcm.Write(0xFF21, 0xA8, sink);
+        pcm.Write(0xFF22, 0x00, sink);
+        pcm.Write(0xFF23, 0x80, sink);
+        for (int i = 1; i <= 64; ++i) {
+            pcm.Run(i * 64, sink);
+            Check(pcm.Read(0xFF76) == static_cast<std::uint8_t>((pcm.Out(1) << 4) | pcm.Out(0)), "cgb $FF76 PCM12 mismatch");
+            Check(pcm.Read(0xFF77) == static_cast<std::uint8_t>((pcm.Out(3) << 4) | pcm.Out(2)), "cgb $FF77 PCM34 mismatch");
+        }
+
+        // Envelope 64 Hz high-phase (divStep == 7) NRx2 write reloads the step
+        // timer from the written pace (SameBoy Core/apu.c).
+        gb::Apu envLow, envHigh;
+        envLow.Reset(gb::Model::Cgb);
+        envHigh.Reset(gb::Model::Cgb);
+        envLow.Write(0xFF26, 0x80, sink);
+        envHigh.Write(0xFF26, 0x80, sink);
+        envLow.Write(0xFF11, 0xC0, sink), envHigh.Write(0xFF11, 0xC0, sink);
+        envLow.Write(0xFF12, 0xF7, sink), envHigh.Write(0xFF12, 0xF7, sink); // pace 7, falling from 15
+        envLow.Write(0xFF14, 0x87, sink), envHigh.Write(0xFF14, 0x87, sink);
+        envLow.Run(100, sink);          // divStep == 0: NRx2 write does not reload timer (stays 7)
+        envLow.Write(0xFF12, 0xF1, sink);
+        envHigh.Run(7 * 8192 + 100, sink); // divStep == 7: NRx2 write reloads timer to pace 1
+        envHigh.Write(0xFF12, 0xF1, sink);
+        envLow.Run(8 * 8192 + 1, sink);
+        envHigh.Run(8 * 8192 + 1, sink);
+        int peakLow = 0, peakHigh = 0;
+        for (int i = 0; i < 32; ++i) {
+            envLow.Run(envLow.Now() + 64, sink);
+            envHigh.Run(envHigh.Now() + 64, sink);
+            peakLow = std::max(peakLow, envLow.Out(0));
+            peakHigh = std::max(peakHigh, envHigh.Out(0));
+        }
+        Check(peakHigh < peakLow, "envelope clock high-phase NRx2 write must reload step timer");
     }
 }
 
@@ -596,6 +647,31 @@ void TestNes() {
                   "nes triangle does not step 0..15..1");
             Check(enough && at[zero + 30] - at[zero] == 3200, "nes triangle period");
         }
+    }
+
+    // NESdev, APU Status ($4015): bit 6 is the 4-step frame interrupt (cleared
+    // on $4015 read or $4017 bit 6), bit 7 is the DMC interrupt (preserved on
+    // $4015 read, cleared on $4015 write or $4010 bit 7 clear).
+    {
+        auto sink = [](std::int64_t) {};
+        nes::Apu irq;
+        irq.Reset(nes::Region::Ntsc);
+        irq.Write(0x4017, 0x00, sink); // 4-step mode, IRQ enabled
+        irq.Run(30000, sink);
+        const std::uint8_t s1 = irq.ReadStatus();
+        Check((s1 & 0x40) != 0 && (irq.ReadStatus() & 0x40) == 0, "nes $4015 frame IRQ must set and clear on read");
+        irq.Run(65000, sink);
+        irq.Write(0x4017, 0x40, sink); // inhibit clears pending frame IRQ before $4015 read
+        Check((irq.ReadStatus() & 0x40) == 0, "nes $4017 bit 6 clears frame IRQ");
+
+        irq.Write(0x4010, 0x8F, sink); // DMC IRQ enabled, non-looping, fastest rate (54 cycles/bit)
+        irq.Write(0x4013, 0x00, sink); // 1 byte = 8 bits
+        irq.Write(0x4015, 0x10, sink); // start DMC
+        irq.Run(irq.Now() + 2000, sink);
+        Check((irq.ReadStatus() & 0x80) != 0 && (irq.ReadStatus() & 0x80) != 0,
+              "nes $4015 DMC IRQ must set at sample end and stay set across $4015 reads");
+        irq.Write(0x4015, 0x00, sink);
+        Check((irq.ReadStatus() & 0x80) == 0, "nes $4015 write clears DMC IRQ");
     }
 }
 
@@ -864,6 +940,16 @@ void TestCartridges() {
     // The lazy DAC reads 0 until its first slot after the volumes return.
     CheckCatchUp("n163", n163, N163Read, N163Script(false, heard), N163Script(true, heard), heard,
                  famicom::Namco163::kSlot, end);
+    {
+        famicom::Namco163 wrap;
+        wrap.Reset();
+        auto sink = [](std::int64_t) {};
+        wrap.Write(0xF800, 0xFF, sink); // address $7F with auto-increment
+        wrap.Write(0x4800, 0x12, sink); // writes $7F, wraps pointer to $00
+        wrap.Write(0x4800, 0x34, sink); // writes $00, advances pointer to $01
+        wrap.Write(0xF800, 0xFF, sink);
+        Check(wrap.ReadData() == 0x12 && wrap.ReadData() == 0x34, "n163 $4800 auto-increment must wrap $7F -> $00");
+    }
 
     famicom::Fds fds;
     fds.Reset();

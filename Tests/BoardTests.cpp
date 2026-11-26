@@ -665,6 +665,39 @@ void TestBlackboxBus() {
         Check(earlyPeak > 0.1 && maxDeriv < earlyPeak * 0.65 && latePeak < earlyPeak * 0.25,
               "handheld Path::Line CH3 DAC off fades over 50 us decay (early=" + std::to_string(earlyPeak)
                   + " deriv=" + std::to_string(maxDeriv) + " late=" + std::to_string(latePeak) + ")");
+
+        // Reloading CH3 Wave RAM (NR30 = $00 -> 16 Wave RAM writes -> NR30 = $80,
+        // ~48.6 us) must clamp the floating 50 us decay upon re-enable instead of
+        // superposing the residual tail onto the newly driven rail.
+        hh.Reset(Handheld::kColor);
+        hh.Write(0xFF26, 0x80);
+        hh.Write(0xFF24, 0x77);
+        hh.Write(0xFF25, 0xFF);
+        hh.FinishBoot();
+        for (std::uint16_t a = 0xFF30; a <= 0xFF3F; ++a)
+            hh.Write(a, 0x00); // code 0 -> +1.0 rail
+        hh.Write(0xFF1A, 0x80);
+        hh.Write(0xFF1C, 0x20);
+        hh.Write(0xFF1D, 0x00);
+        hh.Write(0xFF1E, 0x80);
+        float railL[256] {}, railR[256] {};
+        hh.Render(256, Path::Line, railL, railR);
+        double steadyRail = 0.0;
+        for (float s : railL)
+            steadyRail = std::max(steadyRail, std::fabs(static_cast<double>(s)));
+        hh.Write(0xFF1A, 0x00);
+        for (std::uint16_t a = 0xFF30; a <= 0xFF3F; ++a)
+            hh.Write(a, 0x00);
+        hh.Write(0xFF1A, 0x80);
+        hh.Write(0xFF1E, 0x80);
+        float reloadL[256] {}, reloadR[256] {};
+        hh.Render(256, Path::Line, reloadL, reloadR);
+        double reloadPeak = 0.0;
+        for (float s : reloadL)
+            reloadPeak = std::max(reloadPeak, std::fabs(static_cast<double>(s)));
+        Check(reloadPeak <= steadyRail * 1.05,
+              "handheld CH3 Wave RAM reload must clamp floating DAC tail without rail overshoot (reload="
+                  + std::to_string(reloadPeak) + " rail=" + std::to_string(steadyRail) + ")");
     }
 
     // Console blackbox: 6502 bus spacing, 5B $C000/$E000 latch, MMC5 $5011 PCM

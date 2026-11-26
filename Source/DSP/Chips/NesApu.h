@@ -110,12 +110,17 @@ public:
     [[nodiscard]] int Out(int channel) const noexcept { return out_[channel]; }
     [[nodiscard]] int RegionIndex() const noexcept { return region_; }
 
-    // A CPU read of $4015 at Now() (NESdev, APU Status).
+    // A CPU read of $4015 at Now() (NESdev, APU Status; spec): returns length
+    // status in bits 0-4, frame interrupt in bit 6 (cleared by reading), and
+    // DMC interrupt in bit 7 (not cleared by reading).
     [[nodiscard]] std::uint8_t ReadStatus() noexcept {
         CatchUpAll();
-        return static_cast<std::uint8_t>((pulse_[0].length > 0 ? 1 : 0) | (pulse_[1].length > 0 ? 2 : 0)
-                                         | (triangle_.length > 0 ? 4 : 0) | (noise_.length > 0 ? 8 : 0)
-                                         | (dmc_.bytesLeft > 0 ? 16 : 0));
+        const std::uint8_t status = static_cast<std::uint8_t>(
+            (pulse_[0].length > 0 ? 1 : 0) | (pulse_[1].length > 0 ? 2 : 0) | (triangle_.length > 0 ? 4 : 0)
+            | (noise_.length > 0 ? 8 : 0) | (dmc_.bytesLeft > 0 ? 16 : 0) | (frameIrq_ ? 0x40 : 0)
+            | (dmcIrq_ ? 0x80 : 0));
+        frameIrq_ = false;
+        return status;
     }
 
     // Processes every event before `to`; sink(cycle) follows any change of
@@ -231,6 +236,9 @@ public:
             noise_.envelope.start = true;
             break;
         case 0x4010:
+            dmc_.irqEnabled = (value & 0x80) != 0;
+            if (!dmc_.irqEnabled)
+                dmcIrq_ = false;
             dmc_.loop = (value & 0x40) != 0;
             dmc_.timer.period = kDmcPeriod[region_][value & 0x0F];
             break;
@@ -244,6 +252,7 @@ public:
             dmc_.sampleLength = static_cast<std::uint16_t>(value * 16 + 1);
             break;
         case 0x4015:
+            dmcIrq_ = false;
             enabled_ = value & 0x1F;
             if (!(value & 1)) pulse_[0].length = 0;
             if (!(value & 2)) pulse_[1].length = 0;
@@ -257,10 +266,14 @@ public:
             }
             break;
         case 0x4017:
-            // APU Frame Counter: the reset follows 3 CPU cycles after a
-            // write during an APU cycle, 4 after one between them; APU
-            // cycles are the even CPU cycles here.
+            // APU Frame Counter: bit 6 inhibits (and clears) the frame IRQ;
+            // the reset follows 3 CPU cycles after a write during an APU
+            // cycle, 4 after one between them; APU cycles are the even CPU
+            // cycles here.
             frameMode_ = (value & 0x80) ? 1 : 0;
+            irqInhibit_ = (value & 0x40) != 0;
+            if (irqInhibit_)
+                frameIrq_ = false;
             resetDue_ = now_ + ((now_ & 1) == 0 ? 3 : 4);
             break;
         default:
@@ -352,7 +365,7 @@ private:
     };
 
     struct Dmc {
-        bool loop = false, silence = true, bufferFull = false;
+        bool irqEnabled = false, loop = false, silence = true, bufferFull = false;
         std::uint8_t level = 0, shifter = 0, bits = 8, buffer = 0;
         std::uint16_t sampleAddress = 0xC000, sampleLength = 1, address = 0xC000, bytesLeft = 0;
         Divider timer { 0, 428 };
@@ -397,6 +410,10 @@ private:
             QuarterFrame();
         if (f.half[frameIndex_])
             HalfFrame();
+        // APU Frame Counter: step 4 of the 4-step sequence asserts the frame
+        // interrupt unless $4017 bit 6 inhibits it.
+        if (frameMode_ == 0 && frameIndex_ == 3 && !irqInhibit_)
+            frameIrq_ = true;
         if (++frameIndex_ == f.steps) {
             frameIndex_ = 0;
             frameStart_ += f.length;
@@ -441,8 +458,12 @@ private:
         dmc_.buffer = rom_ ? rom_[dmc_.address & 0x7FFF] : 0;
         dmc_.bufferFull = true;
         dmc_.address = dmc_.address == 0xFFFF ? 0x8000 : static_cast<std::uint16_t>(dmc_.address + 1);
-        if (--dmc_.bytesLeft == 0 && dmc_.loop)
-            DmcRestart();
+        if (--dmc_.bytesLeft == 0) {
+            if (dmc_.loop)
+                DmcRestart();
+            else if (dmc_.irqEnabled)
+                dmcIrq_ = true;
+        }
     }
 
     // APU DMC, output unit: one timer clock.
@@ -527,6 +548,7 @@ private:
     Dmc dmc_;
     std::uint8_t enabled_ = 0;
     int frameMode_ = 0, frameIndex_ = 0;
+    bool irqInhibit_ = false, frameIrq_ = false, dmcIrq_ = false;
     std::int64_t frameStart_ = 0, frameDue_ = 0, resetDue_ = kNever;
     const std::uint8_t* rom_ = nullptr;
     std::uint8_t out_[kChannels] {};

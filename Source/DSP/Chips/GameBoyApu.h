@@ -154,7 +154,8 @@ public:
             sink(now_);
     }
 
-    // A CPU read from $FF10-$FF3F at Now() (Pan Docs, Audio Registers).
+    // A CPU read from $FF10-$FF3F (and CGB $FF76-$FF77) at Now() (Pan Docs,
+    // Audio Registers and CGB Registers).
     [[nodiscard]] std::uint8_t Read(std::uint16_t address) noexcept {
         CatchUpAll();
         if (address >= 0xFF30 && address <= 0xFF3F) {
@@ -168,6 +169,12 @@ public:
             return static_cast<std::uint8_t>((power_ ? 0x80 : 0x00) | 0x70 | (square_[0].on ? 1 : 0)
                                              | (square_[1].on ? 2 : 0) | (wave_.on ? 4 : 0) | (noise_.on ? 8 : 0));
         }
+        // Pan Docs, CGB Registers (PCM12 $FF76, PCM34 $FF77; spec): instant
+        // digital outputs of CH1-CH2 and CH3-CH4 on CGB; unmapped ($FF) on DMG.
+        if (address == 0xFF76)
+            return model_ == Model::Cgb ? static_cast<std::uint8_t>((out_[kPulse2] << 4) | out_[kPulse1]) : 0xFF;
+        if (address == 0xFF77)
+            return model_ == Model::Cgb ? static_cast<std::uint8_t>((out_[kNoise] << 4) | out_[kWave]) : 0xFF;
         if (address >= 0xFF10 && address <= 0xFF25) {
             static constexpr std::uint8_t kReadMask[22] = {
                 0x80, 0x3F, 0x00, 0xFF, 0xBF,
@@ -301,7 +308,7 @@ private:
         case 0xFF12: case 0xFF17: {
             Square& s = square_[address == 0xFF12 ? 0 : 1];
             if (s.on)
-                Zombie(model_, s.envelope, value);
+                Zombie(model_, s.envelope, value, divStep_ == 7);
             else
                 s.envelope.reg = value;
             if ((value & 0xF8) == 0)
@@ -347,7 +354,7 @@ private:
             break;
         case 0xFF21:
             if (noise_.on)
-                Zombie(model_, noise_.envelope, value);
+                Zombie(model_, noise_.envelope, value, divStep_ == 7);
             else
                 noise_.envelope.reg = value;
             if ((value & 0xF8) == 0)
@@ -378,10 +385,10 @@ private:
     // the old value to $FF and then $FF to the new, each by one rule
     // (ZombieStep). It keeps Pan Docs' $x8-on-$x8 increment, which SameBoy
     // notes "always work[s] as expected", while "$x0 writes seem to be
-    // non-deterministic" on the original (README, Known gaps). SameBoy also
-    // reloads the step timer when the envelope's clock is high, a phase the
-    // envelope here does not model.
-    static void Zombie(Model model, Envelope& e, std::uint8_t value) noexcept {
+    // non-deterministic" on the original (README, Known gaps). When the 64 Hz
+    // envelope clock is high (DIV-APU step 7), the step timer reloads from
+    // the newly written pace (SameBoy, Core/apu.c; reported).
+    static void Zombie(Model model, Envelope& e, std::uint8_t value, bool envelopeClockHigh) noexcept {
         if (model == Model::Cgb) {
             int v = e.volume;
             if ((e.reg & 7) == 0 && !e.halted)
@@ -396,6 +403,13 @@ private:
             e.volume = static_cast<std::uint8_t>(v);
         }
         e.reg = value;
+        if (envelopeClockHigh) {
+            const int pace = value & 7;
+            e.timer = static_cast<std::uint8_t>(pace ? pace : 8);
+            e.running = pace != 0;
+            if (pace != 0)
+                e.halted = false;
+        }
     }
 
     // One half of the original's zombie write, NRx2 from `from` to `to`:

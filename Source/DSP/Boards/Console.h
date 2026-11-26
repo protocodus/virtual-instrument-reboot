@@ -157,6 +157,7 @@ public:
         tb_.Set(clock.numerator, clock.denominator, rate_, traits_.clock + trim);
         mix_.Clear();
         bus_.Clear();
+        atRest_ = false;
         pinBlocker_.Reset();
         fdsLowPass_.SetCoefficients(FirstOrder::Kind::LowPass, fdsLowPassCoeffs_[0]);
         fdsLowPass_.Reset();
@@ -188,6 +189,7 @@ public:
     // 6502 store timing (4 CPU cycles for STA abs when the value is already in
     // A or to an auto-incrementing streaming port; 6 cycles for LDA #imm; STA abs).
     void Write(std::uint16_t address, std::uint8_t value) noexcept {
+        atRest_ = false;
         const int step = (bus_.HasLast() && (bus_.LastValue() == value || address == 0x4800 || address == 0x4088)) ? 4 : 6;
         if (bus_.Full()) {
             const BusWrite w = bus_.Pop();
@@ -255,6 +257,10 @@ public:
 
     void Render(int frames, Path path, float* left, float* right) {
         RunTo(tb_.CycleAt(frames));
+        if (atRest_) {
+            tb_.Advance(frames);
+            return;
+        }
         float bus[2][StepBuffer::kMaxFrames] {};
         mix_.Read(0, bus[0], frames);
         mix_.Read(1, bus[1], frames);
@@ -369,9 +375,12 @@ private:
         s5bOut_.Settle(0.0);
         highPass_.Settle(cartridge_ == kMmc5 || cartridge_ == k5B ? 0.0 : apu + other);
         lowPass_.Settle(0.0);
+        atRest_ = !settling_ && bus_.Empty();
     }
 
     void ApuChanged(std::int64_t cycle) noexcept {
+        if (!settling_)
+            atRest_ = false;
         const int p = apu_.Out(nes::Apu::kPulse1) + apu_.Out(nes::Apu::kPulse2);
         const int t = apu_.Out(nes::Apu::kTriangle);
         const int n = apu_.Out(nes::Apu::kNoise);
@@ -387,6 +396,8 @@ private:
     }
 
     void CartChanged(std::int64_t cycle) noexcept {
+        if (!settling_)
+            atRest_ = false;
         const std::int64_t position = Position(cycle);
         double level = 0.0;
         int bus = 0;
@@ -473,6 +484,7 @@ private:
     int rate_ = 48000;
     UnitTraits traits_;
     bool settling_ = false;   // FinishBoot: every step lands at the block's start
+    bool atRest_ = false;
     int revision_ = kFrontLoader;
     int cartridge_ = kNone;
     double cpuHz_ = 19687500.0 / 11.0;

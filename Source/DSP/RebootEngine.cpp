@@ -586,22 +586,30 @@ int Engine::StartNote(int key, int velocity, bool maySteal) {
     if (count == 0)
         return -1;
 
-    // A slot's rank: 0 free, 1 released, 2 held. A later part is taken only
-    // when every channel of the parts before it is held, so a melody keeps
-    // its voice and a chord spills onto the chip's others; when all are
-    // held, the oldest note of them all gives way.
-    int best = -1, bestRank = 3, bestPart = 0;
+    // A slot's rank: 0 free on a machine already holding a key (so a chord
+    // packs onto one chip's channels and mixer before taking a second unit),
+    // 1 free on an idle machine (oldest freed first, rotating phrases across
+    // units), 2 released, 3 held. A later part is taken only when every
+    // channel of the parts before it is held, so a melody keeps its voice and
+    // a chord spills onto the chip's others; when all are held, the oldest
+    // note of them all gives way.
+    int best = -1, bestRank = 4, bestPart = 0;
     std::uint64_t bestAge = 0;
-    for (int p = 0; p < count && bestRank >= 2; ++p)
-        for (int b = 0; b < boards_; ++b)
+    for (int p = 0; p < count && bestRank >= 3; ++p)
+        for (int b = 0; b < boards_; ++b) {
+            bool boardHeld = false;
+            for (int c = 0; c < Machine::kMaxChannels; ++c)
+                if (slots_[b * Machine::kMaxChannels + c].busy && slots_[b * Machine::kMaxChannels + c].gate)
+                    boardHeld = true;
             for (int ch = parts[p].first; ch < parts[p].first + parts[p].count; ++ch) {
                 const int s = b * Machine::kMaxChannels + ch;
                 const Slot& n = slots_[s];
-                const int rank = !n.busy ? 0 : n.gate ? 2 : 1;
+                const int rank = !n.busy ? (boardHeld ? 0 : 1) : n.gate ? 3 : 2;
                 if (rank < bestRank || (rank == bestRank && n.age < bestAge))
                     best = s, bestRank = rank, bestAge = n.age, bestPart = p;
             }
-    if (best < 0 || (!maySteal && bestRank != 0))
+        }
+    if (best < 0 || (!maySteal && bestRank >= 2))
         return -1;
     const Part part = parts[bestPart];
 
@@ -1058,7 +1066,8 @@ void Engine::Tick(int unit, std::int64_t at) {
         ++p.frames;
         if (p.frames > vibratoDelay_) {
             p.phase += vibratoStep_;
-            p.phase -= std::floor(p.phase);
+            while (p.phase >= 1.0)
+                p.phase -= 1.0;
         }
         if (p.glideLeft > 0) {
             p.glide -= p.glide / p.glideLeft;

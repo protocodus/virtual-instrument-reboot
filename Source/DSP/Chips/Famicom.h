@@ -395,13 +395,13 @@ public:
     void Write(std::uint16_t address, std::uint8_t value, Sink& sink) {
         CatchUp();
         if (address >= 0xF800) {
-            // Bits 0-6 the address, bit 7 auto-increment (stops at $7F).
+            // Bits 0-6 the address, bit 7 auto-increment (wraps $7F to $00; NESdev).
             pointer_ = value & 0x7F;
             increment_ = (value & 0x80) != 0;
         } else if (address >= 0x4800 && address < 0x5000) {
             ram_[pointer_] = value;
-            if (increment_ && pointer_ < 0x7F)
-                ++pointer_;
+            if (increment_)
+                pointer_ = (pointer_ + 1) & 0x7F;
         } else if (address >= 0xE000 && address < 0xE800) {
             disabled_ = (value & 0x40) != 0;
         }
@@ -413,8 +413,8 @@ public:
     [[nodiscard]] std::uint8_t ReadData() noexcept {
         CatchUp();
         const std::uint8_t value = ram_[pointer_];
-        if (increment_ && pointer_ < 0x7F)
-            ++pointer_;
+        if (increment_)
+            pointer_ = (pointer_ + 1) & 0x7F;
         return value;
     }
 

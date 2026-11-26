@@ -12,6 +12,7 @@ points use the whole range, then rounded to the nearest step.
 """
 
 import argparse
+import itertools
 import math
 import sys
 
@@ -28,11 +29,12 @@ WAVES = [
     ("Reed", [(1, 1.0, 0.0), (2, 0.5, 0.25), (3, 0.6, 0.0), (5, 0.4, 0.25), (6, 0.3, 0.0)]),
 ]
 
-# The disk unit's modulation table: a sine in its 3-bit step codes
-# (0 +0, 1 +1, 2 +2, 3 +4, 5 -4, 6 -2, 7 -1; 4 resets, never used here),
-# chosen so the accumulated counter follows one sine cycle over 32 steps.
-MOD_STEPS = [0, 1, 2, 4, -4, -2, -1]
+# The disk unit's modulation tables: exact zero-sum anti-symmetric sine waves
+# in its 3-bit step codes (0 +0, 1 +1, 2 +2, 3 +4, 5 -4, 6 -2, 7 -1; 4 resets,
+# never used here) at 1, 2 and 4 cycles across the 32-entry table so carrier
+# octave folding above $FFF keeps 1:1 harmonic modulation without counter drift.
 MOD_CODES = {0: 0, 1: 1, 2: 2, 4: 3, -4: 5, -2: 6, -1: 7}
+MOD_PEAKS = [(1, 32), (2, 24), (4, 12)]
 
 
 def shape_value(shape, t):
@@ -59,15 +61,30 @@ def draw(spec, length, top):
     return [int(math.floor((v - low) / (high - low) * top + 0.5)) for v in points]
 
 
-def mod_table():
-    # Steps whose running sum follows 16 * sin over 32 entries, greedily.
-    table, level = [], 0
-    for i in range(32):
-        target = round(16 * math.sin(2 * math.pi * (i + 1) / 32))
-        step = min(MOD_STEPS, key=lambda s: abs(level + s - target))
-        level += step
-        table.append(MOD_CODES[step])
-    return table
+def mod_table(cycles, peak):
+    # Each table entry applies twice per 2^13 accumulator span (carries out of
+    # bit 11), so after 2k carries from 0 the counter sits at
+    # C(k) = t[0] + 2 * sum(t[1:k]) + t[k]. Mirroring a quarter-wave t[0:q]
+    # with t[q] = 0 and t[2q] = -t[0] gives exact odd/even symmetry, C(0) = 0,
+    # C(q) = peak, C(2q) = 0, C(3q) = -peak, and zero drift on every pitch.
+    q = (32 // cycles) // 4
+    best = min(
+        (t for t in itertools.product((0, 1, 2, 4), repeat=q) if t[0] + 2 * sum(t[1:]) == peak),
+        key=lambda t: sum(
+            (t[0] + 2 * sum(t[1:k]) + t[k] - peak * math.sin(math.pi * k / (2 * q))) ** 2
+            for k in range(1, q)
+        ),
+    )
+    cycle = (
+        list(best)
+        + [0]
+        + [-x for x in reversed(best[1:])]
+        + [-best[0]]
+        + [-x for x in best[1:]]
+        + [0]
+        + list(reversed(best[1:]))
+    )
+    return [MOD_CODES[s] for s in cycle * cycles]
 
 
 def render():
@@ -106,8 +123,13 @@ def render():
         out.append("    { " + ", ".join(str(v) for v in s) + " },")
     out.append("};")
     out.append("")
-    out.append("// The disk unit's 32 modulation step codes: one sine cycle.")
-    out.append("constexpr std::uint8_t kModTable[32] = { " + ", ".join(str(v) for v in mod_table()) + " };")
+    out.append("// The disk unit's 32 modulation step codes at 1, 2 and 4 cycles.")
+    out.append("constexpr int kModPeak[3] = { " + ", ".join(str(p) for _, p in MOD_PEAKS) + " };")
+    out.append("constexpr std::uint8_t kModTables[3][32] = {")
+    for cycles, peak in MOD_PEAKS:
+        out.append("    { " + ", ".join(str(v) for v in mod_table(cycles, peak)) + " },")
+    out.append("};")
+    out.append("constexpr std::uint8_t kModTable[32] = { " + ", ".join(str(v) for v in mod_table(*MOD_PEAKS[0])) + " };")
     out.append("")
     out.append("} // namespace protocodus::reboot")
     out.append("")

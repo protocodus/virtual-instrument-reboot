@@ -238,7 +238,7 @@ private:
     int mono_ = -1;                     // Mono and Arp: the note
 
     Controls controls_;
-    int boards_ = 2;
+    int boards_ = 6;
     Path path_ = Path::Line;
     int part_ = 0, shape_ = 0, level_ = 0, sustain_ = 0;
     int transpose_ = 0, mod_ = 0;

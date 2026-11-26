@@ -519,17 +519,19 @@ private:
             }
             TookEnvelope(sh, s);
             // The modulator at the carrier's own rate (its accumulator runs
-            // on the same scale), depth from the part's mod (0-63).
-            const int depth = Clamp(s.mod, 0, 63);
-            if (trigger) {
+            // on the same scale, folded to 2 or 4 cycles above $FFF with matching
+            // depth compensation so FM stays 1:1 harmonic across the top octave).
+            const int fold = mult == 4 ? 2 : mult == 2 ? 1 : 0;
+            const int depth = Clamp((s.mod * kModPeak[0] + kModPeak[fold] / 2) / kModPeak[fold], 0, 63);
+            if (trigger || mult != sh.mult) {
                 c.Write(0x4087, 0x80);
                 for (int i = 0; i < 32; ++i)
-                    c.Write(0x4088, kModTable[i]);
+                    c.Write(0x4088, kModTables[fold][i]);
                 c.Write(0x4085, 0x00);
             }
-            if (trigger || depth != sh.mod)
+            if (trigger || s.mod != sh.mod || mult != sh.mult)
                 c.Write(0x4084, static_cast<std::uint8_t>(0x80 | depth));
-            if (trigger || regPitch != sh.regPitch) {
+            if (trigger || regPitch != sh.regPitch || mult != sh.mult) {
                 c.Write(0x4082, static_cast<std::uint8_t>(regPitch & 0xFF));
                 c.Write(0x4083, static_cast<std::uint8_t>((regPitch >> 8) & 15));
                 c.Write(0x4086, static_cast<std::uint8_t>(regPitch & 0xFF));

@@ -100,6 +100,7 @@ public:
         dacOff_[0].Clear();
         dacOff_[1].Clear();
         bus_.Clear();
+        atRest_ = false;
         for (int s = 0; s < 2; ++s) {
             const bool color = revision == kColor;
             capacitor_[s] = capacitorDesign_[color ? kColor : kOriginal];
@@ -113,12 +114,15 @@ public:
         for (int c = 0; c < kChannels; ++c) {
             wasDacOn_[c] = false;
             lastChSide_[c][0] = 0.0, lastChSide_[c][1] = 0.0;
+            offSide_[c][0] = 0.0, offSide_[c][1] = 0.0;
+            offCycle_[c] = 0;
         }
     }
 
     // Schedules a CPU bus write to $FF10-$FF3F using SM83 bus timing (8 T-cycles
     // for repeated LDH (C), A writes; 12 T-cycles for LDH (a8), A; Pan Docs).
     void Write(std::uint16_t address, std::uint8_t value) noexcept {
+        atRest_ = false;
         const int step = (bus_.HasLast() && bus_.LastAddress() == address) ? 8 : 12;
         if (bus_.Full()) {
             const BusWrite w = bus_.Pop();
@@ -156,8 +160,13 @@ public:
             dacOff_[s].Clear();
             dacResidual_[s] = 0.0;
         }
+        for (int c = 0; c < kChannels; ++c) {
+            offSide_[c][0] = 0.0, offSide_[c][1] = 0.0;
+            offCycle_[c] = apu_.Now();
+        }
         tb_.Restart(apu_.Now());
         bus_.ResetTiming(apu_.Now());
+        atRest_ = true;
     }
 
     [[nodiscard]] std::int64_t CycleAt(int frame) const noexcept { return tb_.CycleAt(frame); }
@@ -193,6 +202,10 @@ public:
     // and moves on.
     void Render(int frames, Path path, float* left, float* right) {
         RunTo(tb_.CycleAt(frames));
+        if (atRest_) {
+            tb_.Advance(frames);
+            return;
+        }
         float bus[2][StepBuffer::kMaxFrames] {};
         mix_.Read(0, bus[0], frames);
         mix_.Read(1, bus[1], frames);
@@ -214,6 +227,16 @@ public:
     [[nodiscard]] int Revision() const noexcept { return revision_; }
 
 private:
+    // exp(-elapsed / (4194304 * 50 us)) without libm for -fno-builtin:
+    // u = x / 32 < 0.45 on elapsed < 3000, degree-5 Taylor raised to 32.
+    [[nodiscard]] static double ExpNegDacCycles(std::int64_t elapsed) noexcept {
+        const double u = static_cast<double>(elapsed) * (20000.0 / 4194304.0 / 32.0);
+        double p = 1.0 - u * (1.0 - u * (0.5 - u * ((1.0 / 6.0) - u * ((1.0 / 24.0) - u * (1.0 / 120.0)))));
+        for (int i = 0; i < 5; ++i)
+            p *= p;
+        return p;
+    }
+
     void Filter(int frames, Path path, const float (*bus)[StepBuffer::kMaxFrames],
                 const float (*offDelta)[StepBuffer::kMaxFrames], float* left, float* right) noexcept {
         float* out[2] = { left, right };
@@ -245,6 +268,8 @@ private:
     }
 
     void Changed(std::int64_t cycle) noexcept {
+        if (!settling_)
+            atRest_ = false;
         const std::int64_t position = Position(cycle);
         const std::uint8_t nr51 = apu_.Panning();
         const std::uint8_t nr50 = apu_.MasterVolume();
@@ -271,6 +296,20 @@ private:
             if (!dac && wasDacOn_[c]) {
                 dacOff_[0].Add(position, QuantizeLevel(static_cast<float>(lastChSide_[c][0])));
                 dacOff_[1].Add(position, QuantizeLevel(static_cast<float>(lastChSide_[c][1])));
+                offSide_[c][0] = lastChSide_[c][0];
+                offSide_[c][1] = lastChSide_[c][1];
+                offCycle_[c] = cycle;
+            } else if (dac && !wasDacOn_[c]) {
+                // Re-enabling a channel's CMOS DAC clamps its output to the
+                // driven code at once, ending any floating 50 us decay still
+                // left from an earlier turn-off (such as a Wave RAM reload).
+                const std::int64_t elapsed = cycle - offCycle_[c];
+                if ((offSide_[c][0] != 0.0 || offSide_[c][1] != 0.0) && elapsed >= 0 && elapsed < 3000) {
+                    const double decay = ExpNegDacCycles(elapsed);
+                    dacOff_[0].Add(position, -QuantizeLevel(static_cast<float>(offSide_[c][0] * decay)));
+                    dacOff_[1].Add(position, -QuantizeLevel(static_cast<float>(offSide_[c][1] * decay)));
+                }
+                offSide_[c][0] = 0.0, offSide_[c][1] = 0.0;
             }
             wasDacOn_[c] = dac;
             lastChSide_[c][0] = chSide[c][0];
@@ -282,6 +321,7 @@ private:
     int revision_ = kOriginal;
     UnitTraits traits_;
     bool settling_ = false;   // FinishBoot: every step lands at the block's start
+    bool atRest_ = false;
     gb::Apu apu_;
     Timebase tb_;
     BusWriteQueue<> bus_;
@@ -300,6 +340,8 @@ private:
     double dacFadeFactor_ = 0.0;
     bool wasDacOn_[kChannels] {};
     double lastChSide_[kChannels][2] {};
+    double offSide_[kChannels][2] {};
+    std::int64_t offCycle_[kChannels] {};
     double dacResidual_[2] {};
 };
 
